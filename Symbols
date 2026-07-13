@@ -1,0 +1,944 @@
+using pfcls;
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Linq;
+using System.Runtime.InteropServices;
+using System.Security.Cryptography.X509Certificates;
+using System.Text;
+using System.Threading.Tasks;
+using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Data;
+using System.Windows.Documents;
+using System.Windows.Input;
+using System.Windows.Media;
+using System.Windows.Media.Imaging;
+using System.Windows.Navigation;
+using System.Windows.Shapes;
+using static System.Collections.Specialized.BitVector32;
+namespace Symbols
+{
+    /// <summary>
+    /// Interaction logic for MainWindow.xaml
+    /// </summary>
+    public partial class MainWindow : Window
+    {
+        public static CCpfcAsyncConnection asc { get; set; }
+        public static IpfcAsyncConnection iac { get; set; }
+        public static IpfcBaseSession Session { get; set; }
+
+        public MainWindow()
+        {
+
+            Connect();
+            //FindSymbol();
+            //InitializeComponent();
+            //GetData();
+            // GetSymbols();
+            //ModifyLShapePipe();
+            // CalculateLongestPipeDistance();
+            //GetSymbolsCustomizationData();
+            GetSymbolGroups();
+            isSymbolHasGroups();
+
+            //GetAllSymbolsCustomizationData(Session);
+        }
+        public void Connect()
+        {
+            try
+            {
+                asc = new CCpfcAsyncConnection();
+                iac = asc.Connect(null, null, null, null);
+                Session = (IpfcBaseSession)iac.Session;
+            }
+            catch
+            {
+                Kill_Process("pfclscom");
+                Connect_2();
+            }
+        }
+        public void Connect_2()
+        {
+            try
+            {
+                asc = new CCpfcAsyncConnection();
+                iac = asc.Connect(null, null, null, null);
+                Session = (IpfcBaseSession)iac.Session;
+            }
+            catch (Exception e)
+            {
+                MessageBox.Show("Error connecting creo" + e.Message);
+            }
+        }
+        private void Kill_Process(
+           string processName)
+        {
+            try
+            {
+                Process[] processes =
+                    Process.GetProcessesByName(
+                        processName);
+
+                foreach (Process process in processes)
+                {
+                    process.Kill();
+                }
+            }
+            catch
+            {
+            }
+        }
+        public void FindSymbol()
+        {
+            try
+            {
+
+                IpfcModel model = Session.CurrentModel;
+
+                if (model == null)
+                {
+                    MessageBox.Show("No active model found.");
+                    return;
+                }
+
+
+                if (model.Type != (int)EpfcModelType.EpfcMDL_DRAWING)
+                {
+                    MessageBox.Show("Current model is not a drawing.");
+                    return;
+                }
+
+                IpfcDrawing drawing = (IpfcDrawing)model;
+                IpfcDetailItemOwner owner = (IpfcDetailItemOwner)drawing;
+
+                StringBuilder output = new StringBuilder();
+                int symbolCount = 0;
+                int noteCount = 0;
+
+                IpfcDetailItems symbols = owner.ListDetailItems(
+                    EpfcDetailType.EpfcDETAIL_SYM_INSTANCE,
+                    null
+                );
+
+                if (symbols != null && symbols.Count > 0)
+                {
+                    for (int i = 0; i < symbols.Count; i++)
+                    {
+                        symbolCount++;
+                        IpfcDetailSymbolInstItem symbol = (IpfcDetailSymbolInstItem)symbols[i];
+
+                        output.AppendLine("SYMBOL " + symbolCount);
+                        try
+                        {
+                            IpfcDetailSymbolInstInstructions instructions = symbol.GetInstructions(false);
+                            if (instructions != null)
+                            {
+                                output.AppendLine("Symbol instance found");
+                            }
+                        }
+                        catch
+                        {
+                            output.AppendLine("Unable to read symbol data");
+                        }
+                        output.AppendLine("-------------------------");
+                    }
+                }
+
+                IpfcDetailItems notes = owner.ListDetailItems(
+                    EpfcDetailType.EpfcDETAIL_NOTE,
+                    null
+                );
+
+                if (notes != null && notes.Count > 0)
+                {
+                    for (int i = 0; i < notes.Count; i++)
+                    {
+                        noteCount++;
+                        IpfcDetailNoteItem note = (IpfcDetailNoteItem)notes[i];
+
+                        output.AppendLine("NOTE " + noteCount);
+                        try
+                        {
+                            IpfcDetailNoteInstructions noteInstruction = note.GetInstructions(true);
+                            if (noteInstruction != null)
+                            {
+                                output.AppendLine("Note found");
+                            }
+                        }
+                        catch
+                        {
+                            output.AppendLine("Unable to read note text");
+                        }
+                        output.AppendLine("-------------------------");
+                    }
+                }
+
+
+                if (symbolCount == 0 && noteCount == 0)
+                {
+                    MessageBox.Show("No symbols or notes found.");
+                    return;
+                }
+
+
+                StringBuilder final = new StringBuilder();
+                final.AppendLine("DRAWING DETAIL INFORMATION");
+                final.AppendLine("Total Symbols : " + symbolCount);
+                final.AppendLine("Total Notes   : " + noteCount);
+                final.AppendLine("");
+                final.Append(output.ToString());
+
+                MessageBox.Show(final.ToString(), "Creo Drawing Details");
+            }
+            catch (COMException ex)
+            {
+                MessageBox.Show("Creo Toolkit Error:\n\n" + ex.Message + "\n\nHRESULT : " + ex.ErrorCode);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Error:\n" + ex.Message);
+            }
+        }
+
+        public void GetData()
+        {
+            IpfcModel model = Session.CurrentModel;
+
+            if (model == null)
+            {
+                MessageBox.Show("No active model found.");
+                return;
+            }
+
+
+            if (model.Type != (int)EpfcModelType.EpfcMDL_DRAWING)
+            {
+                MessageBox.Show("Current model is not a drawing.");
+                return;
+            }
+
+            IpfcDrawing drawing = (IpfcDrawing)model;
+            IpfcDetailItemOwner owner = (IpfcDetailItemOwner)drawing;
+
+        }
+        public void GetSymbols()
+        {
+            try
+            {
+                IpfcModel model = Session.CurrentModel;
+
+                if (model == null)
+                {
+                    MessageBox.Show("No active model found.");
+                    return;
+                }
+
+                if (model.Type != (int)EpfcModelType.EpfcMDL_DRAWING)
+                {
+                    MessageBox.Show("Current model is not a drawing.");
+                    return;
+                }
+
+                IpfcDrawing drawing = (IpfcDrawing)model;
+                IpfcDetailItemOwner owner = (IpfcDetailItemOwner)drawing;
+
+                StringBuilder sb = new StringBuilder();
+                sb.AppendLine(" DRAWING SYMBOL COMPONENTS ");
+
+
+                IpfcDetailItems items = owner.ListDetailItems(EpfcDetailType.EpfcDETAIL_SYM_INSTANCE, null);
+
+                if (items != null && items.Count > 0)
+                {
+                    for (int i = 0; i < items.Count; i++)
+                    {
+                        IpfcDetailSymbolInstItem drwitem = (IpfcDetailSymbolInstItem)items[i];
+                        string symbolName = " ";
+
+                        try
+                        {
+                            IpfcDetailSymbolInstInstructions inst = drwitem.GetInstructions(false);
+
+                            if (inst != null && inst.SymbolDef != null)
+                            {
+
+                                IpfcDetailSymbolDefInstructions defInsts = inst.SymbolDef.GetInstructions();
+                                if (defInsts != null)
+                                {
+                                    symbolName = defInsts.Name;
+                                }
+
+                                sb.AppendLine($"\n[Symbol Instance {i + 1}] Name: {symbolName}");
+
+
+                                IpfcDetailItems internalElements = inst.SymbolDef.ListDetailItems(EpfcDetailType.EpfcDETAIL_NOTE);
+
+                                if (internalElements != null && internalElements.Count > 0)
+                                {
+                                    sb.AppendLine("  Internal Notes Found:");
+
+                                    for (int e = 0; e < internalElements.Count; e++)
+                                    {
+                                        IpfcDetailItem componentItem = internalElements[e];
+
+
+                                        if (componentItem.GetDetailType() == (int)EpfcDetailType.EpfcDETAIL_NOTE)
+                                        {
+                                            IpfcDetailNoteItem internalNote = (IpfcDetailNoteItem)componentItem;
+                                            string notetext = "";
+
+                                            try
+                                            {
+                                                IpfcDetailNoteInstructions noteinst = internalNote.GetInstructions(true);
+                                                if (noteinst != null && noteinst.TextLines != null)
+                                                {
+                                                    for (int l = 0; l < noteinst.TextLines.Count; l++)
+                                                    {
+                                                        var parts = noteinst.TextLines[l].Texts;
+                                                        for (int t = 0; t < parts.Count; t++)
+                                                        {
+                                                            notetext += parts[t].Text;
+                                                        }
+                                                    }
+                                                }
+
+                                                sb.AppendLine($" {notetext}");
+                                            }
+                                            catch
+                                            {
+                                                sb.AppendLine(" -> [Unreachable Text]");
+                                            }
+                                        }
+                                    }
+                                }
+                                else
+                                {
+                                    sb.AppendLine("(No internal note elements discovered in this definition)");
+                                }
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            symbolName = "Error Reading (" + ex.Message + ")";
+                            sb.AppendLine($"Symbol Instance {i + 1} {symbolName}");
+                        }
+                    }
+                }
+                else
+                {
+                    sb.AppendLine("No symbol instances discovered on drawing sheet layers.");
+                }
+
+                MessageBox.Show(sb.ToString(), "Creo Symbol Manifest Result");
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Global Error: " + ex.Message);
+            }
+        }
+        public static void ModifyLShapePipe()
+        {
+            try
+            {
+                IpfcModel model = Session.CurrentModel;
+
+                if (model == null)
+                {
+                    MessageBox.Show("No active model found.");
+                    return;
+                }
+
+                if (model.Type != (int)EpfcModelType.EpfcMDL_PART)
+                {
+                    MessageBox.Show("Active model is not a Part.");
+                    return;
+                }
+
+                IpfcPart part = (IpfcPart)model;
+
+                IpfcModelItemOwner owner = (IpfcModelItemOwner)part;
+
+                IpfcModelItems surfaces =
+                    owner.ListItems((int)EpfcModelItemType.EpfcITEM_SURFACE);
+
+                if (surfaces == null || surfaces.Count == 0)
+                {
+                    MessageBox.Show("No surfaces found.");
+                    return;
+                }
+
+                int pointsCreated = 0;
+
+                for (int i = 0; i < surfaces.Count; i++)
+                {
+                    IpfcSurface surface = (IpfcSurface)surfaces[i];
+
+                    if (surface.GetSurfaceType() ==
+                        (int)EpfcSurfaceType.EpfcSURFACE_PLANE)
+                    {
+                        pointsCreated++;
+                    }
+                }
+
+                ((IpfcSolid)part).Regenerate(null);
+                MessageBox.Show(
+                    $"Found {pointsCreated} planar end surfaces.");
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(ex.Message);
+            }
+        }
+        public static void CalculateLongestPipeDistance()
+        {
+            try
+            {
+                IpfcModel model = Session.CurrentModel;
+                if (model == null)
+                {
+                    MessageBox.Show("No active model found.");
+                    return;
+                }
+
+                if (model.Type != (int)EpfcModelType.EpfcMDL_PART)
+                {
+                    MessageBox.Show("Active model is not a 3D Part (.prt).");
+                    return;
+                }
+
+                IpfcPart part = (IpfcPart)model;
+                IpfcModelItemOwner owner = (IpfcModelItemOwner)part;
+
+                IpfcModelItems pointsCollection = owner.ListItems((int)EpfcModelItemType.EpfcITEM_POINT);
+
+                if (pointsCollection == null || pointsCollection.Count < 2)
+                {
+                    MessageBox.Show("At least two points are required in the model.");
+                    return;
+                }
+
+                IpfcSelection endPoint1 = null;
+                IpfcSelection endPoint2 = null;
+
+                for (int i = 0; i < pointsCollection.Count; i++)
+                {
+
+                    IpfcModelItem pointItem = (IpfcModelItem)pointsCollection[i];
+
+                    IpfcSelection currentSel = new CMpfcSelect().CreateModelItemSelection(pointItem, null);
+
+                    if (endPoint1 == null)
+                    {
+                        endPoint1 = currentSel;
+                    }
+                    else if (endPoint2 == null)
+                    {
+                        endPoint2 = currentSel;
+                        break;
+                    }
+                }
+
+                if (endPoint1 == null || endPoint2 == null)
+                {
+                    MessageBox.Show("Could not successfully select two points.");
+                    return;
+                }
+
+                IpfcSelectionPair selectionPair = new CCpfcSelectionPair().Create(endPoint1, endPoint2);
+
+                IpfcSelectionEvaluator evaluator = new CMpfcInterference().CreateSelectionEvaluator(selectionPair);
+                IpfcCriticalDistanceData distanceData = evaluator.ComputeNearestCriticalDistance();
+
+                if (distanceData != null)
+                {
+                    double totalPipeLength = distanceData.Distance;
+                    MessageBox.Show($"Pipe Feature Analysis Complete!\n\n" +
+                                    $"Distance Between Points: {totalPipeLength:F4} units");
+                }
+                else
+                {
+                    MessageBox.Show("Distance calculation returned null data.");
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Creo API Error: " + ex.Message);
+            }
+        }
+
+        public static void GetSymbolsCustomizationData()
+        {
+            try
+            {
+                if (Session == null)
+                {
+                    MessageBox.Show("Creo session is not available.");
+                    return;
+                }
+
+                IpfcModel model = Session.CurrentModel;
+
+                if (model == null)
+                {
+                    MessageBox.Show("No active model.");
+                    return;
+                }
+
+                if (model.Type != (int)EpfcModelType.EpfcMDL_DRAWING)
+                {
+                    MessageBox.Show("Current model is not a drawing.");
+                    return;
+                }
+
+                IpfcDrawing drawing = (IpfcDrawing)model;
+                IpfcModelItemOwner owner = (IpfcModelItemOwner)drawing;
+
+                StringBuilder result = new StringBuilder();
+
+                result.AppendLine(" SYMBOL DEFINITIONS ");
+                result.AppendLine();
+
+                IpfcModelItems defItems =
+                    owner.ListItems((int)EpfcModelItemType.EpfcITEM_DTL_SYM_DEFINITION);
+
+                if (defItems == null || defItems.Count == 0)
+                {
+                    MessageBox.Show("No symbol definitions found.");
+                    return;
+                }
+
+                for (int i = 0; i < defItems.Count; i++)
+                {
+                    IpfcDetailSymbolDefItem symDef =
+                        (IpfcDetailSymbolDefItem)defItems[i];
+
+                    IpfcDetailSymbolDefInstructions defInst =
+                        symDef.GetInstructions();
+
+
+                    result.AppendLine("Symbol Definition : " + defInst.Name);
+
+
+                    try
+                    {
+                        IpfcDetailSymbolGroups groups = symDef.ListSubgroups();
+
+                        if (groups != null && groups.Count > 0)
+                        {
+                            for (int j = 0; j < groups.Count; j++)
+                            {
+                                PrintGroup(groups[j], result, 1);
+                            }
+                        }
+                        else
+                        {
+                            result.AppendLine("No groups found.");
+                        }
+                    }
+                    catch
+                    {
+                        result.AppendLine("No groups defined.");
+                    }
+
+                    result.AppendLine();
+                }
+
+                MessageBox.Show(result.ToString());
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(ex.Message);
+            }
+        }
+
+        private static void PrintGroup(
+            IpfcDetailSymbolGroup group,
+            StringBuilder result,
+            int level)
+        {
+            if (group == null)
+                return;
+
+            IpfcDetailSymbolGroupInstructions inst =
+                group.GetInstructions();
+
+            result.AppendLine(
+                new string(' ', level * 4) +
+                "Group : " + inst.Name);
+
+            try
+            {
+                IpfcDetailSymbolGroups children = group.ListChildren();
+
+                if (children != null && children.Count > 0)
+                {
+                    for (int i = 0; i < children.Count; i++)
+                    {
+                        PrintGroup(children[i], result, level + 1);
+                    }
+                }
+            }
+            catch
+            {
+                // No child groups
+            }
+        }
+        public static void GetAllSymbolsCustomizationData(IpfcBaseSession Session)
+        {
+            try
+            {
+
+                if (Session == null)
+                {
+                    MessageBox.Show("Creo session is not available.");
+                    return;
+                }
+
+
+                IpfcModel model = Session.CurrentModel;
+
+
+                if (model == null)
+                {
+                    MessageBox.Show("No active model.");
+                    return;
+                }
+
+
+
+                if (model.Type != (int)EpfcModelType.EpfcMDL_DRAWING)
+                {
+                    MessageBox.Show("Current model is not a drawing.");
+                    return;
+                }
+
+
+
+                IpfcDrawing drawing = (IpfcDrawing)model;
+
+
+                StringBuilder result = new StringBuilder();
+
+
+                result.AppendLine("===== SYMBOL CUSTOMIZATION DATA =====");
+                result.AppendLine();
+
+
+
+                int symbolCount = 0;
+
+                IpfcModelItemOwner owner = (IpfcModelItemOwner)drawing;
+                IpfcModelItems items = owner.ListItems(
+                    (int)EpfcModelItemType.EpfcITEM_DTL_SYM_DEFINITION
+                );
+
+
+
+                if (items == null || items.Count == 0)
+                {
+                    MessageBox.Show(
+                        "No detail items found in drawing."
+                    );
+
+                    return;
+                }
+
+
+
+                for (int i = 0; i < items.Count; i++)
+                {
+
+                    IpfcDetailItem detailItem = (IpfcDetailItem)items[i];
+
+
+                    if (detailItem == null)
+                        continue;
+
+
+
+                    if (detailItem.GetDetailType()
+                        != (int)EpfcDetailType.EpfcDETAIL_SYM_INSTANCE)
+                    {
+                        continue;
+                    }
+
+
+
+                    symbolCount++;
+
+
+                    IpfcDetailSymbolInstItem symbol =
+                        (IpfcDetailSymbolInstItem)detailItem;
+
+
+
+                    result.AppendLine(
+                        "----------- Symbol "
+                        + symbolCount
+                        + " -----------"
+                    );
+
+                    try
+                    {
+
+                        IpfcDetailSymbolInstInstructions instructions =
+                            symbol.GetInstructions(false);
+
+
+
+                        if (instructions == null)
+                        {
+                            result.AppendLine(
+                                "No instructions available."
+                            );
+
+                            continue;
+                        }
+
+
+
+                        if (instructions.SymbolDef != null)
+                        {
+                            result.AppendLine(
+                                "Symbol definition exists."
+                            );
+                        }
+                        else
+                        {
+                            result.AppendLine(
+                                "Symbol definition not available."
+                            );
+                        }
+                        try
+                        {
+
+                            IpfcDetailVariantTexts texts =
+                                instructions.get_TextValues();
+
+
+
+                            if (texts != null &&
+                                texts.Count > 0)
+                            {
+
+                                result.AppendLine(
+                                    "Variable Text Values:"
+                                );
+
+
+                                for (int j = 0;
+                                     j < texts.Count;
+                                     j++)
+                                {
+
+                                    IpfcDetailVariantText text =
+                                        texts[j];
+
+
+                                    result.AppendLine(
+                                        "  "
+                                        + text.Value
+                                    );
+
+                                }
+
+                            }
+                            else
+                            {
+                                result.AppendLine(
+                                    "No variable text values."
+                                );
+                            }
+
+
+                        }
+                        catch
+                        {
+                            result.AppendLine(
+                                "Unable to read text customization."
+                            );
+                        }
+
+
+                    }
+                    catch (Exception ex)
+                    {
+
+                        result.AppendLine(
+                            "Symbol read error : "
+                            + ex.Message
+                        );
+
+                    }
+
+
+
+                    result.AppendLine();
+
+                }
+
+                if (symbolCount == 0)
+                {
+                    MessageBox.Show(
+                        "No symbol instances found."
+                    );
+                }
+                else
+                {
+
+                    MessageBox.Show(
+                        result.ToString(),
+                        "Total Symbols : " + symbolCount
+                    );
+
+                }
+
+
+
+            }
+            catch (Exception ex)
+            {
+
+                MessageBox.Show(
+                    ex.Message,
+                    "Creo API Error"
+                );
+
+            }
+
+        }
+        public void GetSymbolGroups()
+        {
+            string _groups = "";
+            int num = 0;
+            StringBuilder sb = new StringBuilder();
+            IpfcModel model = Session.CurrentModel;
+            IpfcDrawing draw = (IpfcDrawing)model;
+            IpfcModelItemOwner owner = (IpfcModelItemOwner)draw;
+            IpfcModelItems modelitems = owner.ListItems(EpfcModelItemType.EpfcITEM_DTL_SYM_INSTANCE);
+            int count = modelitems.Count;
+            for (int i = 0; i < count; i++)
+            {
+                IpfcDetailSymbolInstItem institem = (IpfcDetailSymbolInstItem)modelitems[i];
+                string name = institem.GetInstructions(false).SymbolDef.GetInstructions().Name;
+                sb.Append(name);
+                if (name == "SC_FLAGS_NOTES")
+                {
+                    IpfcDetailSymbolGroups val = institem.ListGroups((int)EpfcSymbolGroupFilter.EpfcDTLSYMINST_ACTIVE_GROUPS);
+                    num = val.Count;
+                    sb.Append(num);
+                    for (int j = 0; j < num; j++)
+                    {
+                        _groups = val[j].GetInstructions().Name;
+                        sb.Append(_groups);
+                    }
+                }
+
+            }
+            MessageBox.Show(sb.ToString());
+        }
+        public static void isSymbolHasGroups()
+        {
+            IpfcModel model = Session.CurrentModel;
+            IpfcDrawing draw = (IpfcDrawing)model;
+            IpfcModelItemOwner owner = (IpfcModelItemOwner)draw;
+            IpfcModelItems items = owner.ListItems(EpfcModelItemType.EpfcITEM_DTL_SYM_DEFINITION);
+            int count = items.Count;
+            for (int i = 0; i < count; i++)
+            {
+                IpfcDetailSymbolDefItem defitem = (IpfcDetailSymbolDefItem)items[i];
+                string name = defitem.GetInstructions().Name;
+                if (name == "SC_FLAGS_NOTES")
+                {
+                    bool isnull = defitem.IsSubgroupLevelExclusive(null);
+                    if (isnull == true)
+                    {
+                        MessageBox.Show("group avalable");
+                    }
+                    else
+                    {
+                        MessageBox.Show("no group avalable");
+                    }
+                }
+
+            }
+        }
+
+        public static void SetCustomOrientation()
+        {
+            IpfcAsyncConnection connection = null;
+
+            try
+            {
+                Console.WriteLine("Connecting to active Creo session...");
+
+             
+                IpfcModel model = Session.CurrentModel;
+
+                // 3. Ensure a model is active and check that it is a valid Part file
+                if (model == null || (int)model.Type != (int)EpfcModelType.EpfcMDL_PART)
+                {
+                    Console.WriteLine("ERROR: Please open a valid Creo Part model first.");
+                    return;
+                }
+
+                // 4. Instantiate a blank 3D Matrix block using CpfcMatrix3D
+                IpfcMatrix3D matrix = new CpfcMatrix3D();
+
+                // Row 0: Screen X-Axis Direction (Right)
+                matrix.Set(0, 0, 1.0); matrix.Set(0, 1, 0.0); matrix.Set(0, 2, 0.0); matrix.Set(0, 3, 0.0);
+
+                // Row 1: Screen Y-Axis Direction (Up)
+                matrix.Set(1, 0, 0.0); matrix.Set(1, 1, 1.0); matrix.Set(1, 2, 0.0); matrix.Set(1, 3, 0.0);
+
+                // Row 2: Screen Z-Axis Direction (Towards User)
+                matrix.Set(2, 0, 0.0); matrix.Set(2, 1, 0.0); matrix.Set(2, 2, 1.0); matrix.Set(2, 3, 0.0);
+
+                // Row 3: Position Translation Layout (No panning offset)
+                matrix.Set(3, 0, 0.0); matrix.Set(3, 1, 0.0); matrix.Set(3, 2, 0.0); matrix.Set(3, 3, 1.0);
+
+                // 5. Package matrix into a 3D Transform definition instance
+                IpfcTransform3D transform = new CCpfcTransform3D().Create(matrix);
+
+                // 6. FIX: Cast model to IpfcViewOwner interface to expose orientation methods
+                IpfcViewOwner viewOwner = (IpfcViewOwner)model;
+
+                // 7. FIX: Apply the transformation directly to the active model viewport screen state
+                viewOwner.SetCurrentViewTransform(transform);
+
+                // 8. FIX: Save the active screen layout look directly into a named view orientation slot
+                string viewName = "MY_ORIENTATION";
+                viewOwner.SaveView(viewName);
+
+                // 9. Query the active window workspace viewport and flush canvas updates
+                IpfcWindow currentWindow = Session.get_CurrentWindow();
+                if (currentWindow != null)
+                {
+                    currentWindow.Repaint();
+                }
+
+                Console.WriteLine("SUCCESS: Custom Orientation '" + viewName + "' has been successfully registered!");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("EXECUTION ERROR: " + ex.Message);
+            }
+            finally
+            {
+                if (connection != null)
+                {
+                    connection.Disconnect(null);
+                    Console.WriteLine("Disconnected cleanly from Creo.");
+                }
+            }
+
+            Console.WriteLine("Press any key to exit...");
+            Console.ReadKey();
+        }
+
+
+
+    }
+}
+  
