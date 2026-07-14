@@ -1,0 +1,179 @@
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+using pfcls;
+namespace ConsoleApp1
+{
+    public class Program
+    {
+        public static CCpfcAsyncConnection asc { get; set; }
+        public static IpfcAsyncConnection iac { get; set; }
+        public static IpfcBaseSession Session { get; set; }
+        static void Main(string[] args)
+        {
+            Connect();
+            stack_notes();
+            //OpenModelInCreo();
+        }
+        public static void Connect()
+        {
+            try
+            {
+                asc = new CCpfcAsyncConnection();
+                iac = asc.Connect(null, null, null, null);
+                Session = (IpfcBaseSession)iac.Session;
+            }
+            catch
+            {
+                Kill_Process("pfclscom");
+                Connect_2();
+            }
+        }
+        public static void Connect_2()
+        {
+            try
+            {
+                asc = new CCpfcAsyncConnection();
+                iac = asc.Connect(null, null, null, null);
+                Session = (IpfcBaseSession)iac.Session;
+            }
+            catch (Exception e)
+            {
+               Console.WriteLine("Error connecting creo" + e.Message);
+            }
+        }
+        private static void Kill_Process(
+           string processName)
+        {
+            try
+            {
+                Process[] processes =
+                    Process.GetProcessesByName(
+                        processName);
+
+                foreach (Process process in processes)
+                {
+                    process.Kill();
+                }
+            }
+            catch
+            {
+            }
+        }
+        public static void stack_notes()
+        {
+            try
+            {
+               
+                string binloc = AppDomain.CurrentDomain.BaseDirectory;
+                string formattedPath = binloc.Replace("\\", "\\\\");
+
+               
+                string xmlFilePath = formattedPath + "St_Note.xml";
+                string txtFilePath = formattedPath + "St_txt";
+
+                Console.WriteLine($"Target XML Profile Path: {xmlFilePath}");
+
+                if (Session == null)
+                {
+                    Console.WriteLine("Failed to connect to an active Creo session.");
+                    return;
+                }
+
+               
+                StringBuilder SB = new StringBuilder();
+
+              
+                SB.Append("~ Activate `main_dlg_cur` `user_custom_page_41955272:sn`; ");
+                SB.Append("~ FocusIn `dlg_main` `pb_export_user_profile`; ");
+
+               
+                SB.Append("~ Activate `dlg_main` `cb_5tbl_stack_notes_dynamic` 1; ");
+                SB.Append("~ Activate `dlg_main` `cb_22tbl_stack_notes_dynamic` 1; ");
+                SB.Append("~ Activate `dlg_main` `cb_23tbl_stack_notes_dynamic` 1; ");
+                SB.Append("~ Activate `dlg_main` `cb_24tbl_stack_notes_dynamic` 1; ");
+                SB.Append("~ Activate `dlg_main` `cb_25tbl_stack_notes_dynamic` 1; ");
+                SB.Append("~ Activate `dlg_main` `cb_30tbl_stack_notes_dynamic` 1; ");
+                SB.Append("~ Activate `dlg_main` `cb_33tbl_stack_notes_dynamic` 1; ");
+                SB.Append("~ Activate `dlg_main` `cb_38tbl_stack_notes_dynamic` 1; ");
+                SB.Append("~ Activate `dlg_main` `cb_42tbl_stack_notes_dynamic` 1; ");
+                SB.Append("~ Activate `dlg_main` `cb_43tbl_stack_notes_dynamic` 1; ");
+
+               
+                SB.Append("~ Activate `dlg_main` `pb_export_user_profile`; ");
+                SB.Append("~ Trail `UI Desktop` `UI Desktop` `DLG_PREVIEW_POST` `file_open`; ");
+                SB.Append("~ Activate `file_open` `desktop_pb`; ");
+
+             
+                SB.Append($"~ Input `file_open` `Inputname` `{xmlFilePath}`; ");
+                SB.Append($"~ Update `file_open` `Inputname` `{xmlFilePath}`; ");
+
+              
+                SB.Append("~ Command `ProFileSelPushOpen@context_dlg_open_cmd`; ");
+                SB.Append("~ FocusIn `dlg_main` `pb_export_user_profile`; ");
+                SB.Append("~ Activate `dlg_main` `pb_ok`;");
+
+               
+                Session.RunMacro(SB.ToString());
+
+                Console.WriteLine("Stack notes macro pushed and executed successfully inside Creo Drawing layout.");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("API Execution Exception Encountered:");
+                Console.WriteLine(ex.ToString());
+            }
+        }
+
+public static void OpenModelInCreo()
+    {
+        try
+        {
+                string filePath = "C:\\Users\\DensinghD\\Documents\\Creo_part\\box.prt.1";
+
+            if (Session == null)
+            {
+                Console.WriteLine("Could not connect to an active Creo session.");
+                return;
+            }
+
+         
+            if (string.IsNullOrEmpty(filePath))
+            {
+                Console.WriteLine("File path string parameter cannot be empty.");
+                return;
+            }
+
+            Console.WriteLine($"Processing file target: {filePath}");
+
+            IpfcModelDescriptor desc = new CCpfcModelDescriptor().CreateFromFileName(filePath);
+
+           
+            IpfcWindow newWindow = Session.OpenFile(desc);
+
+            if (newWindow != null)
+            {
+               
+                newWindow.Activate();
+                Console.WriteLine("File opened successfully and brought to active viewport focus!");
+            }
+            else
+            {
+                Console.WriteLine("File processed, but failed to generate a window frame context.");
+            }
+        }
+        catch (System.Runtime.InteropServices.COMException comEx)
+        {
+            Console.WriteLine($"Creo Native Toolkit COM Error: {comEx.Message}");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Application Error: {ex.Message}");
+        }
+    }
+
+}
+}
