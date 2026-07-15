@@ -18,6 +18,7 @@ using System.Windows.Navigation;
 using System.Windows.Shapes;
 using static System.Collections.Specialized.BitVector32;
 namespace Symbols
+
 {
     /// <summary>
     /// Interaction logic for MainWindow.xaml
@@ -37,10 +38,18 @@ namespace Symbols
             //GetData();
             // GetSymbols();
             //ModifyLShapePipe();
+            IpfcModel model = Session.CurrentModel;
+            //if(model != null)
+            //{
+            //   MessageBox.Show("model connected");
+            //}
+            createPointsAtEdgeCenters();
+            createAxisAndFindMaxPipeDistance();
+            //createaxis();
             // CalculateLongestPipeDistance();
             //GetSymbolsCustomizationData();
-            GetSymbolGroups();
-            isSymbolHasGroups();
+            // GetSymbolGroups();
+            //  isSymbolHasGroups();
 
             //GetAllSymbolsCustomizationData(Session);
         }
@@ -89,6 +98,392 @@ namespace Symbols
             {
             }
         }
+        public static void createAxisAndFindMaxPipeDistance()
+        {
+            try
+            {
+                if (Session == null)
+                {
+                    MessageBox.Show("ERROR: Session is null.");
+                    return;
+                }
+                IpfcModel model = Session.CurrentModel;
+                if (model == null || model.Type != (int)EpfcModelType.EpfcMDL_PART)
+                {
+                    MessageBox.Show("ERROR: Please open a valid 3D Part file (.prt) first.");
+                    return;
+                }
+                IpfcSolid solid = (IpfcSolid)model;
+                IpfcModelItemOwner itemOwner = (IpfcModelItemOwner)model;
+
+                IpfcModelItems initialAxes = itemOwner.ListItems(EpfcModelItemType.EpfcITEM_AXIS);
+                int initialAxisCount = initialAxes != null ? initialAxes.Count : 0;
+
+                IpfcModelItems surfaceItems = itemOwner.ListItems(EpfcModelItemType.EpfcITEM_SURFACE);
+                int count = surfaceItems.Count;
+
+                int cylindersFound = 0;
+                double firstCyl_X = 0.0,
+                       firstCyl_Y = 0.0, 
+                       firstCyl_Z = 0.0;
+
+                for (int i = 0; i < count; i++)
+                {
+                    IpfcSurface surface = (IpfcSurface)surfaceItems[i];
+                    if (surface.GetSurfaceType() == (int)EpfcSurfaceType.EpfcSURFACE_CYLINDER)
+                    {
+                        IpfcTransformedSurface transSurf = (IpfcTransformedSurface)surface;
+                        IpfcMatrix3D matrix = transSurf.CoordSys.Matrix;
+
+                        double current_X = matrix[3, 0];
+                        double current_Y = matrix[3, 1];
+                        double current_Z = matrix[3, 2];
+
+                        if (cylindersFound == 1)
+                        {
+                            double distanceBetweenCyls = Math.Sqrt(
+                                Math.Pow(current_X - firstCyl_X, 2) +
+                                Math.Pow(current_Y - firstCyl_Y, 2) +
+                                Math.Pow(current_Z - firstCyl_Z, 2)
+                            );
+
+                            if (distanceBetweenCyls < 50.0) continue;
+                        }
+
+                        if (cylindersFound == 0)
+                        {
+                            firstCyl_X = current_X; 
+                            firstCyl_Y = current_Y; 
+                            firstCyl_Z = current_Z;
+                        }
+                        cylindersFound++;
+
+                        IpfcModelItem surfaceModelItem = (IpfcModelItem)surfaceItems[i];
+                        IpfcSession comSession = (IpfcSession)Session;
+                        IpfcSelectionBuffer selectionBuffer = comSession.CurrentSelectionBuffer;
+                        selectionBuffer.Clear();
+
+                        IpfcSelection surfaceSelection = new CMpfcSelect().CreateModelItemSelection(surfaceModelItem, null);
+                        selectionBuffer.AddSelection(surfaceSelection);
+
+                        string createAxisMacro =
+                            "~ Command `ProCmdDatumAxis` ;" +
+                            "~ Activate `Odui_Dlg_01` `stdbtn_1`;";
+
+                        Session.RunMacro(createAxisMacro);
+                        System.Threading.Thread.Sleep(1200);
+
+                        if (cylindersFound >= 2) break;
+                    }
+                }
+
+                if (cylindersFound < 2)
+                {
+                    MessageBox.Show($"WARNING: Could only isolate {cylindersFound} distinct cylindrical end surfaces.");
+                    return;
+                }
+
+                IpfcModelItems updatedAxes = itemOwner.ListItems(EpfcModelItemType.EpfcITEM_AXIS);
+
+                if (updatedAxes == null || updatedAxes.Count < initialAxisCount + 2)
+                {
+                    MessageBox.Show("ERROR: Creo failed to safely instantiate the two background axis elements.");
+                    return;
+                }
+
+                IpfcModelItem axisItem1 = updatedAxes[updatedAxes.Count - 2];
+                IpfcModelItem axisItem2 = updatedAxes[updatedAxes.Count - 1];
+
+                IpfcSession sessionContext = (IpfcSession)Session;
+                IpfcSelectionBuffer axisBuffer = sessionContext.CurrentSelectionBuffer;
+                axisBuffer.Clear();
+
+                IpfcSelection selAxis1 = new CMpfcSelect().CreateModelItemSelection(axisItem1, null);
+                IpfcSelection selAxis2 = new CMpfcSelect().CreateModelItemSelection(axisItem2, null);
+                axisBuffer.AddSelection(selAxis1);
+                axisBuffer.AddSelection(selAxis2);
+
+                string intersectPointMacro =
+                    "~ Command `ProCmdDatumPointGeneral` ;" +
+                    "~ Activate `Odui_Dlg_00` `stdbtn_1`;";
+
+                Session.RunMacro(intersectPointMacro);
+                System.Threading.Thread.Sleep(2000); 
+
+               
+                IpfcModelItems pointsCollection = itemOwner.ListItems(EpfcModelItemType.EpfcITEM_POINT);
+
+                if (pointsCollection == null || pointsCollection.Count < 3)
+                {
+                    MessageBox.Show($"ERROR: Measuring distance requires at least 3 points in the tree history. Found: {pointsCollection?.Count ?? 0}");
+                    return;
+                }
+
+                IpfcModelItem pointPNT0 = pointsCollection[0];
+                IpfcModelItem pointPNT1 = pointsCollection[1];
+                IpfcModelItem pointZ = pointsCollection[pointsCollection.Count - 1];
+                IpfcSelection selZ = new CMpfcSelect().CreateModelItemSelection(pointZ, null);
+                IpfcSelection selP0 = new CMpfcSelect().CreateModelItemSelection(pointPNT0, null);
+                IpfcSelectionPair pair1 = (IpfcSelectionPair)new CCpfcSelectionPair().Create(selZ, selP0);
+                IpfcSelectionEvaluator eval1 = new CMpfcInterference().CreateSelectionEvaluator(pair1);
+                double lengthSide1 = eval1.ComputeNearestCriticalDistance().Distance;
+
+                IpfcSelection selP1 = new CMpfcSelect().CreateModelItemSelection(pointPNT1, null);
+                IpfcSelectionPair pair2 = (IpfcSelectionPair)new CCpfcSelectionPair().Create(selZ, selP1);
+                IpfcSelectionEvaluator eval2 = new CMpfcInterference().CreateSelectionEvaluator(pair2);
+                double lengthSide2 = eval2.ComputeNearestCriticalDistance().Distance;
+
+                double maxDistance = Math.Max(lengthSide1, lengthSide2);
+                string longestSideName = (lengthSide1 > lengthSide2) ? "Side A (Center to PNT0)" : "Side B (Center to PNT1)";
+
+                solid.Regenerate(null);
+                Session.get_CurrentWindow().Repaint();
+
+                MessageBox.Show(
+                                $"Intersection Point Created Successfully at Center Bend (ID Name: {pointZ.GetName()}).\n\n" +
+                                $"Length of Side A (Center -> PNT0): {lengthSide1:F4} units\n" +
+                                $"Length of Side B (Center -> PNT1): {lengthSide2:F4} units\n\n" +
+                                $"Result: Longest segment is {longestSideName} with a maximum length value of {maxDistance:F4} units.");
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Creo pfcls API Error inside pipeline length calculator: " + ex.Message);
+            }
+        }
+
+        public static void createPointsAtEdgeCenters()
+        {
+            try
+            {
+                if (Session == null)
+                {
+                    MessageBox.Show("ERROR: Session is null.");
+                    return;
+                }
+
+                IpfcModel model = Session.CurrentModel;
+                if (model == null || model.Type != (int)EpfcModelType.EpfcMDL_PART)
+                {
+                    MessageBox.Show("ERROR: Please open a valid 3D Part file (.prt) first.");
+                    return;
+                }
+
+                IpfcSolid solid = (IpfcSolid)model;
+                IpfcModelItemOwner itemOwner = (IpfcModelItemOwner)model;
+
+      
+                IpfcModelItems surfaceItems = itemOwner.ListItems(EpfcModelItemType.EpfcITEM_SURFACE);
+                List<double[]> endPlaneOrigins = new List<double[]>();
+
+                for (int s = 0; s < surfaceItems.Count; s++)
+                {
+                    IpfcSurface surface = (IpfcSurface)surfaceItems[s];
+                    if (surface.GetSurfaceType() == (int)EpfcSurfaceType.EpfcSURFACE_PLANE)
+                    {
+                   
+                        IpfcTransformedSurface transSurf = (IpfcTransformedSurface)surface;
+                        IpfcMatrix3D planeMatrix = transSurf.CoordSys.Matrix;
+
+                        double pX = planeMatrix[3, 0];
+                        double pY = planeMatrix[3, 1];
+                        double pZ = planeMatrix[3, 2];
+
+                        endPlaneOrigins.Add(new double[] { pX, pY, pZ });
+                    }
+                }
+                IpfcModelItems edgeItems = itemOwner.ListItems(EpfcModelItemType.EpfcITEM_EDGE);
+                int count = edgeItems.Count;
+                int endpointsCreated = 0;
+                double firstEnd_X = 0.0, firstEnd_Y = 0.0, firstEnd_Z = 0.0;
+                for (int i = 0; i < count; i++)
+                {
+                    IpfcEdge edge = (IpfcEdge)edgeItems[i];
+                    IpfcGeomCurve geomCurve = (IpfcGeomCurve)edge;
+                    IpfcCurveDescriptor curveDesc = geomCurve.GetCurveDescriptor();
+
+                 
+                    if ((int)curveDesc.GetCurveType() == (int)EpfcCurveType.EpfcCURVE_ARC)
+                    {
+                        IpfcArcDescriptor arcDesc = (IpfcArcDescriptor)curveDesc;
+                        CpfcPoint3D arcCenterPoint = (CpfcPoint3D)arcDesc.Center;
+
+                        double current_X = arcCenterPoint[0];
+                        double current_Y = arcCenterPoint[1];
+                        double current_Z = arcCenterPoint[2];
+
+                        
+                        bool matchesEndPlane = false;
+                        foreach (var planeOrigin in endPlaneOrigins)
+                        {
+                            double distToPlaneOrigin = Math.Sqrt(
+                                Math.Pow(current_X - planeOrigin[0], 2) +
+                                Math.Pow(current_Y - planeOrigin[1], 2) +
+                                Math.Pow(current_Z - planeOrigin[2], 2)
+                            );
+
+                           
+                            if (distToPlaneOrigin < 0.5)
+                            {
+                                matchesEndPlane = true;
+                                break;
+                            }
+                        }
+                        if (!matchesEndPlane)
+                        {
+                            continue;
+                        }
+                        if (endpointsCreated == 1)
+                        {
+                            double distanceBetweenEnds = Math.Sqrt(
+                                Math.Pow(current_X - firstEnd_X, 2) +
+                                Math.Pow(current_Y - firstEnd_Y, 2) +
+                                Math.Pow(current_Z - firstEnd_Z, 2)
+                            );
+                            if (distanceBetweenEnds < 50.0)
+                            {
+                                continue;
+                            }
+                        }
+                        if (endpointsCreated == 0)
+                        {
+                            firstEnd_X = current_X;
+                            firstEnd_Y = current_Y;
+                            firstEnd_Z = current_Z;
+                        }
+
+                        endpointsCreated++;
+
+                       
+                        IpfcModelItem edgeModelItem = (IpfcModelItem)edgeItems[i];
+                        IpfcSession comSession = (IpfcSession)Session;
+                        IpfcSelectionBuffer selectionBuffer = comSession.CurrentSelectionBuffer;
+                        selectionBuffer.Clear();
+                        IpfcSelection edgeSelection = new CMpfcSelect().CreateModelItemSelection(edgeModelItem, null);
+                        selectionBuffer.AddSelection(edgeSelection);
+
+                        
+                        string macroCommand =
+                            "~ Command `ProCmdDatumPointGeneral` ;" +
+                            "~ Trigger `Odui_Dlg_00` `t1.RefsTable` 2 `0` `c2`;" +
+                            "~ Focus `Odui_Dlg_00` `t1.RefsTable`;" +
+                            "~ FocusIn `Odui_Dlg_00` `t1.RefsTable`;" +
+                            "~ Select `Odui_Dlg_00` `t1.RefsTable` 2 `0` `c2`;" +
+                            "~ FocusOut `Odui_Dlg_00` `t1.RefsTable`;" +
+                            "~ Open `Odui_Dlg_00` `ConstrTypeOptionMenu_OPTMENU1`;" +
+                            "~ Trigger `Odui_Dlg_00` `t1.RefsTable` 2 `` ``;" +
+                            "~ Timer `` `` `CollectorWdg_FocusTimer`;" +
+                            "~ Close `Odui_Dlg_00` `ConstrTypeOptionMenu_OPTMENU1`;" +
+                            "~ Select `Odui_Dlg_00` `ConstrTypeOptionMenu_OPTMENU1` 1 `DTMPNT_CONSTR_TYPE_CENTER`;" +
+                            "~ FocusOut `Odui_Dlg_00` `t1.RefsTable`;" +
+                            "~ Activate `Odui_Dlg_00` `stdbtn_1`;";
+
+                        Session.RunMacro(macroCommand);
+
+                       
+                        System.Threading.Thread.Sleep(1000);
+
+                        
+                        if (endpointsCreated >= 2)
+                        {
+                            break;
+                        }
+                    }
+                }
+
+                if (endpointsCreated < 2)
+                {
+                    MessageBox.Show($"WARNING: Could only isolate {endpointsCreated} terminal opening faces.");
+                    return;
+                }
+
+                solid.Regenerate(null);
+                Session.get_CurrentWindow().Repaint();
+
+                MessageBox.Show("SUCCESS: Points created at the exact edge centers of both terminal end planes (PNT0 and PNT1)!");
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Creo pfcls API Error inside edge center builder: " + ex.Message);
+            }
+        }
+       
+        public static void CalculateLongestPipeDistance()
+        {
+            try
+            {
+                IpfcModel model = Session.CurrentModel;
+                if (model == null)
+                {
+                    MessageBox.Show("No active model found.");
+                    return;
+                }
+
+                if (model.Type != (int)EpfcModelType.EpfcMDL_PART)
+                {
+                    MessageBox.Show("Active model is not a 3D Part (.prt).");
+                    return;
+                }
+
+                IpfcPart part = (IpfcPart)model;
+                IpfcModelItemOwner owner = (IpfcModelItemOwner)part;
+                IpfcModelItems pointsCollection = owner.ListItems((int)EpfcModelItemType.EpfcITEM_POINT);
+
+                if (pointsCollection == null || pointsCollection.Count < 2)
+                {
+                    MessageBox.Show("At least two points are required in the model.");
+                    return;
+                }
+
+                IpfcSelection endPoint1 = null;
+                IpfcSelection endPoint2 = null;
+
+                for (int i = 0; i < pointsCollection.Count; i++)
+                {
+
+                    IpfcModelItem pointItem = (IpfcModelItem)pointsCollection[i];
+
+                    IpfcSelection currentSel = new CMpfcSelect().CreateModelItemSelection(pointItem, null);
+
+                    if (endPoint1 == null)
+                    {
+                        endPoint1 = currentSel;
+                    }
+                    else if (endPoint2 == null)
+                    {
+                        endPoint2 = currentSel;
+                        break;
+                    }
+                }
+
+                if (endPoint1 == null || endPoint2 == null)
+                {
+                    MessageBox.Show("Could not successfully select two points.");
+                    return;
+                }
+
+                IpfcSelectionPair selectionPair = new CCpfcSelectionPair().Create(endPoint1, endPoint2);
+
+                IpfcSelectionEvaluator evaluator = new CMpfcInterference().CreateSelectionEvaluator(selectionPair);
+                IpfcCriticalDistanceData distanceData = evaluator.ComputeNearestCriticalDistance();
+
+                if (distanceData != null)
+                {
+                    double totalPipeLength = distanceData.Distance;
+                    MessageBox.Show($"Pipe Feature Analysis Complete!\n\n" +
+                                    $"Distance Between Points: {totalPipeLength:F4} units");
+                }
+                else
+                {
+                    MessageBox.Show("Distance calculation returned null data.");
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Creo API Error: " + ex.Message);
+            }
+
+        }
+
         public void FindSymbol()
         {
             try
@@ -390,83 +785,7 @@ namespace Symbols
                 MessageBox.Show(ex.Message);
             }
         }
-        public static void CalculateLongestPipeDistance()
-        {
-            try
-            {
-                IpfcModel model = Session.CurrentModel;
-                if (model == null)
-                {
-                    MessageBox.Show("No active model found.");
-                    return;
-                }
-
-                if (model.Type != (int)EpfcModelType.EpfcMDL_PART)
-                {
-                    MessageBox.Show("Active model is not a 3D Part (.prt).");
-                    return;
-                }
-
-                IpfcPart part = (IpfcPart)model;
-                IpfcModelItemOwner owner = (IpfcModelItemOwner)part;
-
-                IpfcModelItems pointsCollection = owner.ListItems((int)EpfcModelItemType.EpfcITEM_POINT);
-
-                if (pointsCollection == null || pointsCollection.Count < 2)
-                {
-                    MessageBox.Show("At least two points are required in the model.");
-                    return;
-                }
-
-                IpfcSelection endPoint1 = null;
-                IpfcSelection endPoint2 = null;
-
-                for (int i = 0; i < pointsCollection.Count; i++)
-                {
-
-                    IpfcModelItem pointItem = (IpfcModelItem)pointsCollection[i];
-
-                    IpfcSelection currentSel = new CMpfcSelect().CreateModelItemSelection(pointItem, null);
-
-                    if (endPoint1 == null)
-                    {
-                        endPoint1 = currentSel;
-                    }
-                    else if (endPoint2 == null)
-                    {
-                        endPoint2 = currentSel;
-                        break;
-                    }
-                }
-
-                if (endPoint1 == null || endPoint2 == null)
-                {
-                    MessageBox.Show("Could not successfully select two points.");
-                    return;
-                }
-
-                IpfcSelectionPair selectionPair = new CCpfcSelectionPair().Create(endPoint1, endPoint2);
-
-                IpfcSelectionEvaluator evaluator = new CMpfcInterference().CreateSelectionEvaluator(selectionPair);
-                IpfcCriticalDistanceData distanceData = evaluator.ComputeNearestCriticalDistance();
-
-                if (distanceData != null)
-                {
-                    double totalPipeLength = distanceData.Distance;
-                    MessageBox.Show($"Pipe Feature Analysis Complete!\n\n" +
-                                    $"Distance Between Points: {totalPipeLength:F4} units");
-                }
-                else
-                {
-                    MessageBox.Show("Distance calculation returned null data.");
-                }
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show("Creo API Error: " + ex.Message);
-            }
-        }
-
+   
         public static void GetSymbolsCustomizationData()
         {
             try
@@ -871,7 +1190,7 @@ namespace Symbols
 
             try
             {
-                Console.WriteLine("Connecting to active Creo session...");
+                MessageBox.Show("Connecting to active Creo session...");
 
              
                 IpfcModel model = Session.CurrentModel;
@@ -879,7 +1198,7 @@ namespace Symbols
                 // 3. Ensure a model is active and check that it is a valid Part file
                 if (model == null || (int)model.Type != (int)EpfcModelType.EpfcMDL_PART)
                 {
-                    Console.WriteLine("ERROR: Please open a valid Creo Part model first.");
+                    MessageBox.Show("ERROR: Please open a valid Creo Part model first.");
                     return;
                 }
 
@@ -918,22 +1237,22 @@ namespace Symbols
                     currentWindow.Repaint();
                 }
 
-                Console.WriteLine("SUCCESS: Custom Orientation '" + viewName + "' has been successfully registered!");
+                MessageBox.Show("SUCCESS: Custom Orientation '" + viewName + "' has been successfully registered!");
             }
             catch (Exception ex)
             {
-                Console.WriteLine("EXECUTION ERROR: " + ex.Message);
+                MessageBox.Show("EXECUTION ERROR: " + ex.Message);
             }
             finally
             {
                 if (connection != null)
                 {
                     connection.Disconnect(null);
-                    Console.WriteLine("Disconnected cleanly from Creo.");
+                    MessageBox.Show("Disconnected cleanly from Creo.");
                 }
             }
 
-            Console.WriteLine("Press any key to exit...");
+            MessageBox.Show("Press any key to exit...");
             Console.ReadKey();
         }
 
