@@ -1,0 +1,1130 @@
+using pfcls;
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.IO;
+using System.Linq;
+using System.Reflection;
+using System.Text;
+using System.Threading;
+using System.Xml.Linq;
+
+namespace Stack_Notes
+{
+    internal class Program
+    {
+        public static CCpfcAsyncConnection Asc;
+        public static IpfcAsyncConnection Iac;
+        public static IpfcBaseSession Session;
+
+        private static readonly int[] NoteIds = { 840, 5, 23, 22, 25, 30 };
+        private const string CustomNoteText = "SPOT WELDED (THIS IS CUSTOMIZED)";
+
+        private const string SymbolLibraryPath = @"P:\proe\lib\symbols";
+        private const string SymbolName = "SC_FLAGS_NOTES";
+        private const string SymbolGroupName = "IMPORTANT";
+
+        private const bool CreateViewsIfMissing = true;
+        private const bool InsertSymbolFlag = true;
+        private const bool CreateDataTables = true;
+        private const bool ShowDimensionsInTable = true;
+        static void Main(string[] args)
+        {
+            Connect();
+
+            if (Session == null)
+            {
+                Console.WriteLine("No Creo session.");
+                WaitExit();
+                return;
+            }
+
+            try
+            {
+                string xmlPath = Path.Combine(
+                    AppDomain.CurrentDomain.BaseDirectory,
+                    "Stack_Notes.xml");
+
+                DrawingAutomation.RunFullDrawingWorkflow(
+                    Session,
+                    xmlPath,
+                    NoteIds,
+                    CustomNoteText,
+                    SymbolLibraryPath,
+                    SymbolName,
+                    SymbolGroupName,
+                    CreateViewsIfMissing,
+                    InsertSymbolFlag,
+                    CreateDataTables,
+                    ShowDimensionsInTable);
+
+                Console.WriteLine("ALL DONE.");
+                Console.WriteLine("If stack placement waits for a point, click once in the drawing.");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("ERROR: " + ex.Message);
+                Console.WriteLine(ex);
+            }
+
+            WaitExit();
+        }
+
+        private static void WaitExit()
+        {
+            Console.WriteLine("Press any key to close...");
+            Console.ReadKey();
+        }
+
+        public static void Connect()
+        {
+            try
+            {
+                Asc = new CCpfcAsyncConnection();
+                Iac = Asc.Connect(null, null, null, null);
+                Session = (IpfcBaseSession)Iac.Session;
+                Console.WriteLine("Connected to Creo.");
+            }
+            catch
+            {
+                KillProcess("pfclscom");
+                Connect2();
+            }
+        }
+
+        private static void Connect2()
+        {
+            try
+            {
+                Asc = new CCpfcAsyncConnection();
+                Iac = Asc.Connect(null, null, null, null);
+                Session = (IpfcBaseSession)Iac.Session;
+                Console.WriteLine("Connected to Creo (retry).");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("Creo connection failed: " + ex.Message);
+            }
+        }
+
+        private static void KillProcess(string processName)
+        {
+            try
+            {
+                foreach (Process p in Process.GetProcessesByName(processName))
+                    p.Kill();
+            }
+            catch { }
+        }
+    }
+
+
+    public static class Layout
+    {
+        public const double FrontX = 160;
+        public const double FrontY = 170;
+        public const double RightDX = 150;
+        public const double TopDY = 120;
+
+        public const double ModelTableX = 390;
+        public const double ModelTableY = 230;
+
+        public const double DimTableX = 390;
+        public const double DimTableY = 100;
+
+        public const double SymbolX = 520;
+        public const double SymbolY = 280;
+
+        public const int MaxDimensionRows = 20;
+    }
+
+    public static class DrawingAutomation
+    {
+        private static readonly int MDL_PART = (int)EpfcModelType.EpfcMDL_PART;
+        private static readonly int MDL_ASSEMBLY = (int)EpfcModelType.EpfcMDL_ASSEMBLY;
+        private static readonly int MDL_DRAWING = (int)EpfcModelType.EpfcMDL_DRAWING;
+
+        public static void RunFullDrawingWorkflow(
+            IpfcBaseSession session,
+            string stackXmlPath,
+            IEnumerable<int> noteIds,
+            string customText,
+            string symbolPath,
+            string symbolName,
+            string symbolGroup,
+            bool createViews,
+            bool insertSymbol,
+            bool createDataTables,
+            bool showDimensionsInTable)
+        {
+            if (session == null)
+                throw new ArgumentNullException("session");
+
+            List<int> ids = noteIds == null
+                ? new List<int> { 840, 5, 23, 22, 25, 30 }
+                : noteIds.Distinct().ToList();
+
+            IpfcModel solid;
+            IpfcDrawing drawing = EnsureDrawing(session, out solid);
+            Console.WriteLine("Drawing active: " + GetModelName((IpfcModel)drawing));
+
+            if (solid != null)
+                LinkModel(drawing, solid);
+
+            if (createViews && solid != null)
+            {
+                Console.WriteLine("Creating aligned views...");
+                IpfcView2D front = EnsureGeneralView(drawing, solid, "FRONT", Layout.FrontX, Layout.FrontY);
+                if (front != null)
+                {
+                    TryProjection(drawing, front, "RIGHT", Layout.RightDX, 0);
+                    TryProjection(drawing, front, "TOP", 0, Layout.TopDY);
+                }
+                RefreshWindow(session);
+            }
+
+            if (createDataTables)
+            {
+                Console.WriteLine("Creating model data table...");
+                List<string> modelLines = BuildModelDataLines(drawing, solid, customText, ids);
+                CreateMultiLineNote(drawing, modelLines, Layout.ModelTableX, Layout.ModelTableY);
+
+                if (showDimensionsInTable)
+                {
+                    Console.WriteLine("Creating dimension data table...");
+                    List<string> dimLines = BuildDimensionDataLines(drawing, solid);
+                    CreateMultiLineNote(drawing, dimLines, Layout.DimTableX, Layout.DimTableY);
+                }
+
+                RefreshWindow(session);
+            }
+
+            if (insertSymbol)
+            {
+                Console.WriteLine("Inserting symbol...");
+                try
+                {
+                    InsertSymbol(session, drawing, symbolName, symbolPath, symbolGroup,
+                        Layout.SymbolX, Layout.SymbolY);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine("Symbol skipped: " + ex.Message);
+                }
+                RefreshWindow(session);
+            }
+
+            StackNotes.GenerateUserSettingsXml(stackXmlPath, ids, new[] { customText });
+            StackNotes.ApplyStackNotesUi(session, ids, customText);
+            StackNotes.PlaceStackNotes(session);
+            StackNotes.CloseStrayDialogs(session);
+
+            RefreshWindow(session);
+            Console.WriteLine("Workflow finished.");
+        }
+
+        public static List<string> BuildModelDataLines(
+            IpfcDrawing drawing,
+            IpfcModel solid,
+            string customText,
+            IList<int> noteIds)
+        {
+            string drawingName = GetModelName((IpfcModel)drawing);
+            string modelName = solid != null ? GetModelName(solid) : "-";
+            string modelType = "-";
+            string mass = "-";
+            string volume = "-";
+            string density = "-";
+            string surface = "-";
+            string width = "-";
+            string height = "-";
+            string depth = "-";
+
+            if (solid != null)
+            {
+                try
+                {
+                    int t = solid.Type;
+                    if (t == MDL_PART) modelType = "PART";
+                    else if (t == MDL_ASSEMBLY) modelType = "ASSEMBLY";
+                    else modelType = t.ToString();
+                }
+                catch { }
+
+                try
+                {
+                    IpfcSolid s = solid as IpfcSolid;
+                    if (s != null)
+                    {
+                        IpfcMassProperty mp = s.GetMassProperty(null);
+                        if (mp != null)
+                        {
+                            try { mass = FormatNum(mp.Mass); } catch { }
+                            try { volume = FormatNum(mp.Volume); } catch { }
+                            try { density = FormatNum(mp.Density, 6); } catch { }
+                            try { surface = FormatNum(mp.SurfaceArea); } catch { }
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine("Mass property warning: " + ex.Message);
+                }
+
+                try
+                {
+                    double[] box = GetOutlineSize(solid);
+                    if (box != null && box.Length >= 3)
+                    {
+                        width = FormatNum(Math.Abs(box[0]));
+                        height = FormatNum(Math.Abs(box[1]));
+                        depth = FormatNum(Math.Abs(box[2]));
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine("Outline warning: " + ex.Message);
+                }
+            }
+
+            string custom = string.IsNullOrWhiteSpace(customText) ? "-" : customText.Trim();
+            string idsText = (noteIds == null || noteIds.Count == 0) ? "-" : string.Join(", ", noteIds);
+
+            List<string> lines = new List<string>();
+            lines.Add("========== MODEL / DRAWING DATA ==========");
+            lines.Add(PadRow("Drawing", drawingName));
+            lines.Add(PadRow("Model", modelName));
+            lines.Add(PadRow("Type", modelType));
+            lines.Add(PadRow("Mass", mass));
+            lines.Add(PadRow("Volume", volume));
+            lines.Add(PadRow("Density", density));
+            lines.Add(PadRow("Surface Area", surface));
+            lines.Add(PadRow("Width (X)", width));
+            lines.Add(PadRow("Height (Y)", height));
+            lines.Add(PadRow("Depth (Z)", depth));
+            lines.Add(PadRow("Stack Note IDs", idsText));
+            lines.Add(PadRow("Custom Note", custom));
+            lines.Add(PadRow("Generated", DateTime.Now.ToString("yyyy-MM-dd HH:mm")));
+            lines.Add("==========================================");
+            return lines;
+        }
+
+        public static List<string> BuildDimensionDataLines(IpfcDrawing drawing, IpfcModel solid)
+        {
+            List<string> lines = new List<string>();
+            lines.Add("========== DIMENSION DATA ==========");
+
+            List<string> dims = new List<string>();
+
+            try { CollectDimensionsFromModel((IpfcModel)drawing, dims, "DRW"); }
+            catch (Exception ex) { Console.WriteLine("Drawing dim list warning: " + ex.Message); }
+
+            if (solid != null)
+            {
+                try { CollectDimensionsFromModel(solid, dims, "MDL"); }
+                catch (Exception ex) { Console.WriteLine("Model dim list warning: " + ex.Message); }
+            }
+
+            if (dims.Count == 0)
+            {
+                lines.Add("No dimensions found on drawing/model.");
+                lines.Add("Tip: show dimensions in views, then re-run.");
+            }
+            else
+            {
+                List<string> unique = new List<string>();
+                HashSet<string> seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (string d in dims)
+                {
+                    if (seen.Add(d))
+                        unique.Add(d);
+                }
+
+                int count = Math.Min(unique.Count, Layout.MaxDimensionRows);
+                lines.Add(PadRow("Count", unique.Count.ToString() + (unique.Count > count ? " (showing " + count + ")" : "")));
+                for (int i = 0; i < count; i++)
+                    lines.Add(unique[i]);
+            }
+
+            lines.Add("===================================");
+            return lines;
+        }
+
+        private static void CollectDimensionsFromModel(IpfcModel model, List<string> output, string sourceTag)
+        {
+            if (model == null) return;
+
+            IpfcModelItemOwner owner = model as IpfcModelItemOwner;
+            if (owner == null) return;
+
+            IpfcModelItems items = null;
+            try
+            {
+                items = owner.ListItems(EpfcModelItemType.EpfcITEM_DIMENSION);
+            }
+            catch
+            {
+                try
+                {
+                    items = owner.ListItems((EpfcModelItemType)((int)EpfcModelItemType.EpfcITEM_DIMENSION));
+                }
+                catch
+                {
+                    items = null;
+                }
+            }
+
+            if (items == null) return;
+
+            for (int i = 0; i < items.Count; i++)
+            {
+                try
+                {
+                    IpfcModelItem item = items[i];
+                    if (item == null) continue;
+
+                    string name = GetItemName(item, i);
+                    string valueText = TryReadDimensionValue(item);
+
+                    output.Add(PadRow(sourceTag + ":" + name, valueText));
+                }
+                catch { }
+            }
+        }
+
+        private static string GetItemName(IpfcModelItem item, int index)
+        {
+            try
+            {
+                object n = item.GetName();
+                if (n != null && !string.IsNullOrWhiteSpace(n.ToString()))
+                    return n.ToString();
+            }
+            catch { }
+
+            try { return "ID_" + item.Id; }
+            catch { return "DIM_" + index; }
+        }
+
+        private static string TryReadDimensionValue(IpfcModelItem item)
+        {
+            if (item == null) return "-";
+
+            string fromReflection = TryGetNumericMember(item,
+                "DimValue", "Value", "NominalValue", "GetValue", "get_DimValue", "get_Value");
+            if (fromReflection != null)
+                return fromReflection;
+
+            try
+            {
+                IpfcDimension dim = item as IpfcDimension;
+                if (dim != null)
+                {
+                    string v = TryGetNumericMember(dim,
+                        "DimValue", "Value", "NominalValue", "GetValue", "get_DimValue", "get_Value");
+                    if (v != null)
+                        return v;
+                }
+            }
+            catch { }
+
+            try { return "ID=" + item.Id; }
+            catch { return "-"; }
+        }
+
+        private static string TryGetNumericMember(object target, params string[] names)
+        {
+            if (target == null) return null;
+            Type t = target.GetType();
+
+            foreach (string name in names)
+            {
+                try
+                {
+                  
+                    PropertyInfo pi = t.GetProperty(name, BindingFlags.Public | BindingFlags.Instance);
+                    if (pi != null)
+                    {
+                        object val = pi.GetValue(target, null);
+                        string s = FormatObjectNumber(val);
+                        if (s != null) return s;
+                    }
+                }
+                catch { }
+
+                try
+                {
+                  
+                    MethodInfo mi = t.GetMethod(name, BindingFlags.Public | BindingFlags.Instance, null, Type.EmptyTypes, null);
+                    if (mi != null)
+                    {
+                        object val = mi.Invoke(target, null);
+                        string s = FormatObjectNumber(val);
+                        if (s != null) return s;
+                    }
+                }
+                catch { }
+            }
+
+            return null;
+        }
+
+        private static string FormatObjectNumber(object val)
+        {
+            if (val == null) return null;
+            try
+            {
+                if (val is double) return FormatNum((double)val);
+                if (val is float) return FormatNum((float)val);
+                if (val is decimal) return FormatNum((double)(decimal)val);
+                if (val is int) return ((int)val).ToString();
+                if (val is long) return ((long)val).ToString();
+
+                double d;
+                if (double.TryParse(val.ToString(), out d))
+                    return FormatNum(d);
+
+                string s = val.ToString();
+                if (!string.IsNullOrWhiteSpace(s))
+                    return s;
+            }
+            catch { }
+            return null;
+        }
+
+        private static double[] GetOutlineSize(IpfcModel solidModel)
+        {
+            try
+            {
+                IpfcSolid solid = solidModel as IpfcSolid;
+                if (solid == null) return null;
+
+                try
+                {
+                    MethodInfo mi = solid.GetType().GetMethod("GetOutline", Type.EmptyTypes);
+                    if (mi != null)
+                    {
+                        object pts = mi.Invoke(solid, null);
+                        double[] box = PointsToExtents(pts);
+                        if (box != null) return box;
+                    }
+                }
+                catch { }
+
+                try
+                {
+                    MethodInfo mi = solid.GetType().GetMethod("GetGeomOutline");
+                    if (mi != null)
+                    {
+                        object pts = null;
+                        ParameterInfo[] ps = mi.GetParameters();
+                        if (ps.Length == 0)
+                            pts = mi.Invoke(solid, null);
+                        else if (ps.Length == 2)
+                            pts = mi.Invoke(solid, new object[] { null, null });
+
+                        double[] box = PointsToExtents(pts);
+                        if (box != null) return box;
+                    }
+                }
+                catch { }
+            }
+            catch { }
+
+            return null;
+        }
+
+        private static double[] PointsToExtents(object pts)
+        {
+            if (pts == null) return null;
+            try
+            {
+               
+                dynamic d = pts;
+                dynamic p0 = d[0];
+                dynamic p1 = d[1];
+                double dx = Math.Abs((double)p1[0] - (double)p0[0]);
+                double dy = Math.Abs((double)p1[1] - (double)p0[1]);
+                double dz = Math.Abs((double)p1[2] - (double)p0[2]);
+                return new double[] { dx, dy, dz };
+            }
+            catch { return null; }
+        }
+
+        private static string PadRow(string key, string value)
+        {
+            if (key == null) key = "";
+            if (value == null) value = "-";
+            if (value.Length > 48) value = value.Substring(0, 45) + "...";
+            return key.PadRight(16) + ": " + value;
+        }
+
+        private static string FormatNum(double v, int decimals = 4)
+        {
+            return v.ToString("F" + decimals);
+        }
+
+        public static void CreateMultiLineNote(IpfcDrawing drawing, List<string> lines, double x, double y)
+        {
+            if (drawing == null) throw new ArgumentNullException("drawing");
+            if (lines == null || lines.Count == 0) return;
+
+            CpfcDetailTextLines textLines = new CpfcDetailTextLines();
+
+            for (int i = 0; i < lines.Count; i++)
+            {
+                string line = lines[i] ?? "";
+                line = line.Replace("`", "'");
+
+                IpfcDetailText dtext = new CCpfcDetailText().Create(line);
+                CpfcDetailTexts texts = new CpfcDetailTexts();
+                texts.Append(dtext);
+
+                IpfcDetailTextLine textLine = new CCpfcDetailTextLine().Create(texts);
+                textLines.Append(textLine);
+            }
+
+            IpfcDetailNoteInstructions noteIns =
+                new CCpfcDetailNoteInstructions().Create(textLines);
+
+            CpfcPoint3D sheetPos = ToSheetPoint(drawing, MakePoint(x, y, 0));
+            IpfcFreeAttachment attachment = new CCpfcFreeAttachment().Create(sheetPos);
+            IpfcDetailLeaders leaders = new CCpfcDetailLeaders().Create();
+            leaders.set_ItemAttachment(attachment);
+
+       
+            noteIns.set_Leader(leaders);
+
+          
+            try { noteIns.IsDisplayed = true; } catch { }
+
+            IpfcDetailItemOwner owner = (IpfcDetailItemOwner)drawing;
+            IpfcDetailItem item = owner.CreateDetailItem((IpfcDetailCreateInstructions)noteIns);
+
+            try
+            {
+                IpfcDetailNoteItem noteItem = item as IpfcDetailNoteItem;
+                if (noteItem != null)
+                    noteItem.Show();
+            }
+            catch { }
+
+            Console.WriteLine("Note created at (" + x + "," + y + ") lines=" + lines.Count);
+        }
+
+        public static IpfcDrawing EnsureDrawing(IpfcBaseSession session, out IpfcModel solidModel)
+        {
+            solidModel = null;
+            IpfcModel current = session.CurrentModel;
+            if (current == null)
+                throw new InvalidOperationException("No active model. Open a part, assembly, or drawing first.");
+
+            int type = current.Type;
+            Console.WriteLine("Active: " + GetModelName(current) + " type=" + type);
+
+            if (type == MDL_DRAWING)
+            {
+                try
+                {
+                    IpfcModel2D m2d = (IpfcModel2D)current;
+                    IpfcModels models = m2d.ListModels();
+                    if (models != null && models.Count > 0)
+                        solidModel = models[0];
+                }
+                catch { }
+
+                ActivateModelWindow(session, current);
+                return (IpfcDrawing)current;
+            }
+
+            if (type != MDL_PART && type != MDL_ASSEMBLY)
+                throw new InvalidOperationException("Active model must be part, assembly, or drawing.");
+
+            solidModel = current;
+            string name = current.FullName;
+            string path = null;
+            try
+            {
+                if (current.Descr != null)
+                    path = current.Descr.Path;
+            }
+            catch { }
+
+            IpfcModel drwModel = null;
+            try { drwModel = session.GetModel(name, MDL_DRAWING); }
+            catch { drwModel = null; }
+
+            if (drwModel == null)
+            {
+                try { drwModel = RetrieveDrawing(session, name, path); }
+                catch (Exception ex) { Console.WriteLine("Retrieve drawing failed: " + ex.Message); }
+            }
+
+            if (drwModel == null)
+            {
+                try
+                {
+                    if (!string.IsNullOrEmpty(path))
+                    {
+                        string file = Path.Combine(path.TrimEnd('\\', '/'), name + ".drw");
+                        if (File.Exists(file))
+                            drwModel = session.GetModelFromFileName(file);
+                    }
+                }
+                catch (Exception ex) { Console.WriteLine("GetModelFromFileName failed: " + ex.Message); }
+            }
+
+            if (drwModel == null)
+                throw new InvalidOperationException("Could not open drawing '" + name + ".drw'.");
+
+            try { drwModel.Display(); } catch { }
+            ActivateModelWindow(session, drwModel);
+
+            IpfcModel now = session.CurrentModel;
+            if (now == null || now.Type != MDL_DRAWING)
+                throw new InvalidOperationException("Drawing opened but not active.");
+
+            return (IpfcDrawing)now;
+        }
+
+        private static IpfcModel RetrieveDrawing(IpfcBaseSession session, string drawingName, string path)
+        {
+            CCpfcModelDescriptor factory = new CCpfcModelDescriptor();
+            IpfcModelDescriptor descr = factory.Create(MDL_DRAWING, drawingName, null);
+            if (!string.IsNullOrEmpty(path))
+            {
+                string p = path.Trim();
+                if (!p.EndsWith("\\") && !p.EndsWith("/")) p += "\\";
+                descr.Path = p;
+            }
+            return session.RetrieveModel(descr);
+        }
+
+        private static void ActivateModelWindow(IpfcBaseSession session, IpfcModel model)
+        {
+            try
+            {
+                IpfcWindow win = null;
+                try { win = session.GetModelWindow(model); } catch { }
+                if (win == null)
+                {
+                    try { win = session.CreateModelWindow(model); } catch { }
+                }
+
+                if (win != null)
+                {
+                    win.Activate();
+                    try { session.set_CurrentWindow(win); } catch { }
+                    try { win.Refresh(); } catch { }
+                    try { win.Repaint(); } catch { }
+                }
+                else
+                {
+                    try
+                    {
+                        IpfcWindow cw = session.get_CurrentWindow();
+                        if (cw != null) { cw.Activate(); cw.Refresh(); }
+                    }
+                    catch { }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("ActivateModelWindow warning: " + ex.Message);
+            }
+        }
+
+        private static void RefreshWindow(IpfcBaseSession session)
+        {
+            try
+            {
+                IpfcWindow w = session.get_CurrentWindow();
+                if (w != null) { w.Refresh(); w.Repaint(); }
+            }
+            catch { }
+        }
+
+        private static string GetModelName(IpfcModel model)
+        {
+            if (model == null) return string.Empty;
+            try { return model.FullName; }
+            catch
+            {
+                try { return model.InstanceName; }
+                catch { return string.Empty; }
+            }
+        }
+
+        public static void LinkModel(IpfcDrawing drawing, IpfcModel solid)
+        {
+            if (drawing == null || solid == null) return;
+            IpfcModel2D drw2d = (IpfcModel2D)drawing;
+            bool exists = false;
+            try
+            {
+                IpfcModels models = drw2d.ListModels();
+                if (models != null)
+                {
+                    for (int i = 0; i < models.Count; i++)
+                    {
+                        if (string.Equals(models[i].InstanceName, solid.InstanceName, StringComparison.OrdinalIgnoreCase))
+                        {
+                            exists = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            catch { }
+
+            if (!exists)
+            {
+                drw2d.AddModel(solid);
+                Console.WriteLine("Linked model: " + solid.InstanceName);
+            }
+            try { drw2d.SetCurrentSolid(solid); } catch { }
+        }
+
+        public static IpfcView2D EnsureGeneralView(
+            IpfcDrawing drawing,
+            IpfcModel solid,
+            string viewName,
+            double x,
+            double y)
+        {
+            try
+            {
+                IpfcModel2D drw2d = (IpfcModel2D)drawing;
+
+                try
+                {
+                    IpfcView2Ds views = drw2d.List2DViews();
+                    if (views != null)
+                    {
+                        for (int i = 0; i < views.Count; i++)
+                        {
+                            IpfcView2D v = views[i];
+                            if (v != null && string.Equals(v.Name, viewName, StringComparison.OrdinalIgnoreCase))
+                            {
+                                Console.WriteLine("View exists: " + viewName);
+                                return v;
+                            }
+                        }
+                    }
+                }
+                catch { }
+
+                IpfcTransform3D transform;
+                try
+                {
+                    IpfcViewOwner owner = (IpfcViewOwner)solid;
+                    IpfcView sourceView = owner.GetView(viewName);
+                    CpfcMatrix3D matrix = (CpfcMatrix3D)sourceView.Transform.Matrix;
+                    NormalizeMatrix(matrix);
+                    transform = new CCpfcTransform3D().Create(matrix);
+                }
+                catch
+                {
+                    CpfcMatrix3D matrix = new CpfcMatrix3D();
+                    IdentityMatrix(matrix);
+                    transform = new CCpfcTransform3D().Create(matrix);
+                }
+
+                CpfcPoint3D sheetPt = ToSheetPoint(drawing, MakePoint(x, y, 0));
+                IpfcGeneralViewCreateInstructions gvi =
+                    new CCpfcGeneralViewCreateInstructions().Create(solid, 1, sheetPt, transform);
+
+                IpfcView2D newView = drw2d.CreateView((IpfcView2DCreateInstructions)gvi);
+                try { newView.Name = viewName; } catch { }
+                Console.WriteLine("Created view " + viewName + " @ (" + x + "," + y + ")");
+                return newView;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("EnsureGeneralView failed: " + ex.Message);
+                return null;
+            }
+        }
+
+        private static void TryProjection(IpfcDrawing drawing, IpfcView2D parent, string name, double dx, double dy)
+        {
+            try
+            {
+                IpfcModel2D drw2d = (IpfcModel2D)drawing;
+
+                try
+                {
+                    IpfcView2Ds views = drw2d.List2DViews();
+                    if (views != null)
+                    {
+                        for (int i = 0; i < views.Count; i++)
+                        {
+                            if (views[i] != null &&
+                                string.Equals(views[i].Name, name, StringComparison.OrdinalIgnoreCase))
+                            {
+                                Console.WriteLine("Projection exists: " + name);
+                                return;
+                            }
+                        }
+                    }
+                }
+                catch { }
+
+                double x = Layout.FrontX + dx;
+                double y = Layout.FrontY + dy;
+                CpfcPoint3D screenloc = ToSheetPoint(drawing, MakePoint(x, y, 0));
+
+                IpfcProjectionViewCreateInstructions proj =
+                    new CCpfcProjectionViewCreateInstructions().Create(parent, screenloc);
+
+                IpfcView2D v = drw2d.CreateView((IpfcView2DCreateInstructions)proj);
+                try { v.Name = name; } catch { }
+                Console.WriteLine("Created projection " + name + " @ (" + x + "," + y + ")");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("Projection " + name + " failed: " + ex.Message);
+            }
+        }
+
+        private static CpfcPoint3D MakePoint(double x, double y, double z)
+        {
+            CpfcPoint3D p = new CpfcPoint3D();
+            p.Set(0, x);
+            p.Set(1, y);
+            p.Set(2, z);
+            return p;
+        }
+
+        private static CpfcPoint3D ToSheetPoint(IpfcDrawing drawing, CpfcPoint3D pointloc)
+        {
+            try
+            {
+                IpfcSheetOwner owner = (IpfcSheetOwner)drawing;
+                IpfcTransform3D tr = owner.GetSheetTransform(1);
+                tr.Invert();
+                IpfcPoint3D screenloc = tr.TransformPoint(pointloc);
+
+                CpfcPoint3D result = new CpfcPoint3D();
+                result.Set(0, screenloc[0]);
+                result.Set(1, screenloc[1]);
+                try { result.Set(2, screenloc[2]); }
+                catch { result.Set(2, 0); }
+                return result;
+            }
+            catch
+            {
+                try
+                {
+                    CpfcPoint3D copy = new CpfcPoint3D();
+                    copy.Set(0, pointloc[0]);
+                    copy.Set(1, pointloc[1]);
+                    try { copy.Set(2, pointloc[2]); } catch { copy.Set(2, 0); }
+                    return copy;
+                }
+                catch { return pointloc; }
+            }
+        }
+
+        private static void NormalizeMatrix(IpfcMatrix3D matrix)
+        {
+            for (int i = 0; i < 3; i++)
+                matrix.Set(3, i, 0.0);
+
+            for (int row = 0; row < 3; row++)
+            {
+                double length = Math.Sqrt(
+                    matrix[row, 0] * matrix[row, 0] +
+                    matrix[row, 1] * matrix[row, 1] +
+                    matrix[row, 2] * matrix[row, 2]);
+                if (length > 0.00001)
+                {
+                    matrix.Set(row, 0, matrix[row, 0] / length);
+                    matrix.Set(row, 1, matrix[row, 1] / length);
+                    matrix.Set(row, 2, matrix[row, 2] / length);
+                }
+            }
+        }
+
+        private static void IdentityMatrix(IpfcMatrix3D matrix)
+        {
+            matrix.Set(0, 0, 1); matrix.Set(0, 1, 0); matrix.Set(0, 2, 0);
+            matrix.Set(1, 0, 0); matrix.Set(1, 1, 1); matrix.Set(1, 2, 0);
+            matrix.Set(2, 0, 0); matrix.Set(2, 1, 0); matrix.Set(2, 2, 1);
+            matrix.Set(3, 0, 0); matrix.Set(3, 1, 0); matrix.Set(3, 2, 0);
+        }
+
+        public static void InsertSymbol(
+            IpfcBaseSession session,
+            IpfcDrawing drawing,
+            string symbolName,
+            string symbolPath,
+            string groupName,
+            double x,
+            double y)
+        {
+            if (drawing == null) throw new ArgumentNullException("drawing");
+            if (string.IsNullOrWhiteSpace(symbolName)) return;
+
+            string symbolFile = Path.Combine(symbolPath ?? string.Empty, symbolName + ".sym");
+            if (!string.IsNullOrEmpty(symbolPath) && !Directory.Exists(symbolPath))
+                throw new DirectoryNotFoundException("Symbol directory missing: " + symbolPath);
+            if (!string.IsNullOrEmpty(symbolPath) && !File.Exists(symbolFile))
+                throw new FileNotFoundException("Symbol file not found: " + symbolFile);
+
+            IpfcDetailItemOwner owner = (IpfcDetailItemOwner)drawing;
+            IpfcDetailSymbolDefItem symbolDef =
+                owner.RetrieveSymbolDefinition(symbolName, symbolPath, null, null);
+
+            CpfcPoint3D sheetPoint = ToSheetPoint(drawing, MakePoint(x, y, 0));
+            IpfcFreeAttachment attachment = new CCpfcFreeAttachment().Create(sheetPoint);
+            IpfcDetailLeaders leaders = new CCpfcDetailLeaders().Create();
+            leaders.set_ItemAttachment(attachment);
+
+            IpfcDetailSymbolInstInstructions inst =
+                new CCpfcDetailSymbolInstInstructions().Create(symbolDef);
+            inst.set_InstAttachment(leaders);
+
+            if (!string.IsNullOrWhiteSpace(groupName))
+            {
+                try
+                {
+                    IpfcDetailSymbolGroups groups = (IpfcDetailSymbolGroups)symbolDef.ListSubgroups();
+                    if (groups != null)
+                    {
+                        for (int i = 0; i < groups.Count; i++)
+                        {
+                            IpfcDetailSymbolGroup grp = groups[i];
+                            string gname = grp.GetInstructions().Name;
+                            if (string.Equals(gname, groupName, StringComparison.OrdinalIgnoreCase))
+                            {
+                                IpfcDetailSymbolGroups selected = (IpfcDetailSymbolGroups)new CpfcDetailSymbolGroups();
+                                selected.Append(grp);
+                                inst.SetGroups(
+                                    (int)EpfcDetailSymbolGroupOption.EpfcDETAIL_SYMBOL_GROUP_CUSTOM,
+                                    selected);
+                                Console.WriteLine("Symbol group: " + gname);
+                                break;
+                            }
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine("Symbol group skipped: " + ex.Message);
+                }
+            }
+
+            IpfcDetailSymbolInstItem item =
+                (IpfcDetailSymbolInstItem)owner.CreateDetailItem((IpfcDetailCreateInstructions)inst);
+            item.Show();
+            RefreshWindow(session);
+            Console.WriteLine("Symbol inserted: " + symbolName);
+        }
+    }
+
+    public static class StackNotes
+    {
+        public static void GenerateUserSettingsXml(
+            string fullXmlPath,
+            IEnumerable<int> predefinedNoteIds,
+            IEnumerable<string> customNoteLines,
+            string language = "usascii")
+        {
+            var root = new XElement("user_settings");
+
+            foreach (int id in predefinedNoteIds.Distinct())
+            {
+                root.Add(new XElement("note_def",
+                    new XAttribute("is_custom_note", "false"),
+                    new XElement("note_id", id)));
+            }
+
+            foreach (string line in customNoteLines.Where(s => !string.IsNullOrWhiteSpace(s)))
+            {
+                root.Add(new XElement("note_def",
+                    new XAttribute("is_custom_note", "true"),
+                    new XElement("language",
+                        new XAttribute("name", language),
+                        new XElement("line", line.Trim()))));
+            }
+
+            var doc = new XDocument(new XDeclaration("1.0", "utf-8", "yes"), root);
+            string dir = Path.GetDirectoryName(fullXmlPath);
+            if (!string.IsNullOrEmpty(dir))
+                Directory.CreateDirectory(dir);
+            doc.Save(fullXmlPath);
+            Console.WriteLine("XML written: " + fullXmlPath);
+        }
+
+        public static void ApplyStackNotesUi(IpfcBaseSession session, IList<int> noteIds, string customText)
+        {
+            string openMacro =
+                "~ Activate `main_dlg_cur` `user_custom_page_41955272_control_btn` 1;" +
+                "~ Activate `main_dlg_cur` `user_custom_page_41955272:sn`;";
+
+            Console.WriteLine("Opening Stack Notes...");
+            session.RunMacro(openMacro);
+            Thread.Sleep(900);
+
+            var sb = new StringBuilder();
+            foreach (int id in noteIds)
+            {
+                sb.Append("~ Activate `dlg_main` `cb_");
+                sb.Append(id);
+                sb.Append("tbl_stack_notes_dynamic` 1;");
+            }
+            Console.WriteLine("Selecting note IDs: " + string.Join(", ", noteIds));
+            session.RunMacro(sb.ToString());
+            Thread.Sleep(350);
+
+            if (!string.IsNullOrWhiteSpace(customText))
+            {
+                string customMacro =
+                    "~ Arm `dlg_main` `tbl_stack_notes_static` 2 `24` `value`;" +
+                    "~ Disarm `dlg_main` `tbl_stack_notes_static` 2 `24` `value`;" +
+                    "~ Select `dlg_main` `tbl_stack_notes_static` 0;" +
+                    "~ Activate `UI Message Dialog` `yes`;" +
+                    "~ Update `dlg_custom_note` `ta_text_1` `" + EscapeMacro(customText) + "`;" +
+                    "~ Activate `dlg_custom_note` `pb_ok`;";
+                Console.WriteLine("Setting custom stack note...");
+                session.RunMacro(customMacro);
+                Thread.Sleep(350);
+            }
+
+            session.RunMacro("~ Activate `dlg_main` `pb_ok`;");
+            Thread.Sleep(250);
+            CloseStrayDialogs(session);
+        }
+
+        public static void PlaceStackNotes(IpfcBaseSession session)
+        {
+            Console.WriteLine("Placing stack notes...");
+            session.RunMacro("~ Command `SAN_MAIN_STACK_NOTES`;");
+            Thread.Sleep(300);
+        }
+
+        public static void CloseStrayDialogs(IpfcBaseSession session)
+        {
+            string closeMacro =
+                "~ Activate `file_open` `Cancel`;" +
+                "~ Activate `file_open` `close_pb`;" +
+                "~ Activate `file_saveas` `Cancel`;" +
+                "~ Activate `dlg_custom_note` `pb_cancel`;" +
+                "~ Activate `dlg_custom_note` `pb_close`;" +
+                "~ Activate `dlg_main` `pb_cancel`;" +
+                "~ Activate `dlg_main` `pb_close`;" +
+                "~ Activate `dlg_main` `Close`;" +
+                "~ Command `ProCmdWinCloseChild`;" +
+                "<ESC><ESC>;";
+            try { session.RunMacro(closeMacro); Thread.Sleep(200); } catch { }
+            Console.WriteLine("Closed stray dialogs (if any).");
+        }
+
+        private static string EscapeMacro(string text)
+        {
+            if (text == null) return string.Empty;
+            return text.Replace("`", "'");
+        }
+    }
+}
