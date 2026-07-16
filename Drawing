@@ -349,8 +349,6 @@ namespace Stack_Notes
                 }
                 RefreshWindow(session);
             }
-
-            // Stack notes
             try
             {
                 string xmlForThis = stackXmlPath;
@@ -688,9 +686,6 @@ namespace Stack_Notes
             return null;
         }
 
-        // =====================================================================
-        // ASSEMBLY HELPERS
-        // =====================================================================
         private static void TryExplodeAssembly(IpfcBaseSession session, IpfcModel asmModel)
         {
             try
