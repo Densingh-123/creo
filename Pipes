@@ -1,0 +1,372 @@
+using pfcls;
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Threading;
+
+namespace ConsoleApp2
+{
+    public class Program
+    {
+        public static CCpfcAsyncConnection asc { get; set; }
+        public static IpfcAsyncConnection iac { get; set; }
+        public static IpfcBaseSession Session { get; set; }
+
+        public static void Main(string[] args)
+        {
+            Connect();
+
+            if (Session == null)
+            {
+                Console.WriteLine("ERROR: Could not connect to Creo session.");
+                return;
+            }
+
+            IpfcModel model = Session.CurrentModel;
+            if (model == null)
+            {
+                Console.WriteLine("ERROR: No active model.");
+                return;
+            }
+
+            Console.WriteLine("Active model: " + model.InstanceName);
+
+            createPointsAtEdgeCenters();
+
+            createAxisAndFindMinPipeDistance();
+        }
+        public static void createPointsAtEdgeCenters()
+        {
+            try
+            {
+                IpfcModel model = Session.CurrentModel;
+                IpfcSolid solid = (IpfcSolid)model;
+                IpfcModelItemOwner itemOwner = (IpfcModelItemOwner)model;
+                IpfcModelItems surfaceItems = itemOwner.ListItems(EpfcModelItemType.EpfcITEM_SURFACE);
+                List<double[]> endPlaneOrigins = new List<double[]>();
+
+                for (int s = 0; s < surfaceItems.Count; s++)
+                {
+                    IpfcSurface surface = (IpfcSurface)surfaceItems[s];
+                    if (surface.GetSurfaceType() == (int)EpfcSurfaceType.EpfcSURFACE_PLANE)
+                    {
+                        IpfcTransformedSurface transSurf = (IpfcTransformedSurface)surface;
+                        IpfcMatrix3D planeMatrix = transSurf.CoordSys.Matrix;
+
+                        endPlaneOrigins.Add(new double[]
+                        {
+                            planeMatrix[3, 0],
+                            planeMatrix[3, 1],
+                            planeMatrix[3, 2]
+                        });
+                    }
+                }
+
+                IpfcModelItems edgeItems = itemOwner.ListItems(EpfcModelItemType.EpfcITEM_EDGE);
+                int endpointsCreated = 0;
+                double firstEnd_X = 0, firstEnd_Y = 0, firstEnd_Z = 0;
+
+                for (int i = 0; i < edgeItems.Count; i++)
+                {
+                    IpfcEdge edge = (IpfcEdge)edgeItems[i];
+                    IpfcGeomCurve geomCurve = (IpfcGeomCurve)edge;
+                    IpfcCurveDescriptor curveDesc = geomCurve.GetCurveDescriptor();
+
+                    if ((int)curveDesc.GetCurveType() != (int)EpfcCurveType.EpfcCURVE_ARC)
+                        continue;
+
+                    IpfcArcDescriptor arcDesc = (IpfcArcDescriptor)curveDesc;
+                    CpfcPoint3D arcCenter = (CpfcPoint3D)arcDesc.Center;
+
+                    double cx = arcCenter[0];
+                    double cy = arcCenter[1];
+                    double cz = arcCenter[2];
+
+                    bool matchesEndPlane = false;
+                    foreach (var planeOrigin in endPlaneOrigins)
+                    {
+                        double dist = Distance(cx, cy, cz, planeOrigin[0], planeOrigin[1], planeOrigin[2]);
+                        if (dist < 0.5)
+                        {
+                            matchesEndPlane = true;
+                            break;
+                        }
+                    }
+                    if (!matchesEndPlane)
+                        continue;
+
+                    if (endpointsCreated == 1)
+                    {
+                        double distBetweenEnds = Distance(cx, cy, cz, firstEnd_X, firstEnd_Y, firstEnd_Z);
+                        if (distBetweenEnds < 50.0)
+                            continue;
+                    }
+
+                    if (endpointsCreated == 0)
+                    {
+                        firstEnd_X = cx;
+                        firstEnd_Y = cy;
+                        firstEnd_Z = cz;
+                    }
+
+                    endpointsCreated++;
+
+                    IpfcModelItem edgeModelItem = (IpfcModelItem)edgeItems[i];
+                    IpfcSession comSession = (IpfcSession)Session;
+                    IpfcSelectionBuffer selectionBuffer = comSession.CurrentSelectionBuffer;
+                    selectionBuffer.Clear();
+
+                    IpfcSelection edgeSelection =
+                        new CMpfcSelect().CreateModelItemSelection(edgeModelItem, null);
+                    selectionBuffer.AddSelection(edgeSelection);
+
+                    string macroCommand =
+                        "~ Command `ProCmdDatumPointGeneral` ;" +
+                        "~ Trigger `Odui_Dlg_00` `t1.RefsTable` 2 `0` `c2`;" +
+                        "~ Focus `Odui_Dlg_00` `t1.RefsTable`;" +
+                        "~ FocusIn `Odui_Dlg_00` `t1.RefsTable`;" +
+                        "~ Select `Odui_Dlg_00` `t1.RefsTable` 2 `0` `c2`;" +
+                        "~ FocusOut `Odui_Dlg_00` `t1.RefsTable`;" +
+                        "~ Open `Odui_Dlg_00` `ConstrTypeOptionMenu_OPTMENU1`;" +
+                        "~ Trigger `Odui_Dlg_00` `t1.RefsTable` 2 `` ``;" +
+                        "~ Timer `` `` `CollectorWdg_FocusTimer`;" +
+                        "~ Close `Odui_Dlg_00` `ConstrTypeOptionMenu_OPTMENU1`;" +
+                        "~ Select `Odui_Dlg_00` `ConstrTypeOptionMenu_OPTMENU1` 1 `DTMPNT_CONSTR_TYPE_CENTER`;" +
+                        "~ FocusOut `Odui_Dlg_00` `t1.RefsTable`;" +
+                        "~ Activate `Odui_Dlg_00` `stdbtn_1`;";
+
+                    Session.RunMacro(macroCommand);
+                    Thread.Sleep(1000);
+
+                    if (endpointsCreated >= 2)
+                        break;
+                }
+
+                if (endpointsCreated < 2)
+                {
+                    Console.WriteLine($"WARNING: Could only create {endpointsCreated} terminal end point(s). Need 2.");
+                    return;
+                }
+
+                solid.Regenerate(null);
+                Session.get_CurrentWindow().Repaint();
+                Console.WriteLine("SUCCESS: End-center points created on both terminal openings.");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("Error in createPointsAtEdgeCenters: " + ex.Message);
+            }
+        }
+
+        public static void createAxisAndFindMinPipeDistance()
+        {
+            try
+            {
+                IpfcModel model = Session.CurrentModel;
+                IpfcSolid solid = (IpfcSolid)model;
+                IpfcModelItemOwner itemOwner = (IpfcModelItemOwner)model;
+
+              
+                IpfcModelItems initialAxes = itemOwner.ListItems(EpfcModelItemType.EpfcITEM_AXIS);
+                int initialAxisCount = initialAxes != null ? initialAxes.Count : 0;
+
+               
+                IpfcModelItems initialPoints = itemOwner.ListItems(EpfcModelItemType.EpfcITEM_POINT);
+                int initialPointCount = initialPoints != null ? initialPoints.Count : 0;
+
+          
+                IpfcModelItems surfaceItems = itemOwner.ListItems(EpfcModelItemType.EpfcITEM_SURFACE);
+                int cylindersFound = 0;
+                double firstCyl_X = 0, firstCyl_Y = 0, firstCyl_Z = 0;
+
+                for (int i = 0; i < surfaceItems.Count; i++)
+                {
+                    IpfcSurface surface = (IpfcSurface)surfaceItems[i];
+                    if (surface.GetSurfaceType() != (int)EpfcSurfaceType.EpfcSURFACE_CYLINDER)
+                        continue;
+
+                    IpfcTransformedSurface transSurf = (IpfcTransformedSurface)surface;
+                    IpfcMatrix3D matrix = transSurf.CoordSys.Matrix;
+
+                    double cx = matrix[3, 0];
+                    double cy = matrix[3, 1];
+                    double cz = matrix[3, 2];
+
+                    if (cylindersFound == 1)
+                    {
+                        double distBetweenCyls = Distance(cx, cy, cz, firstCyl_X, firstCyl_Y, firstCyl_Z);
+                        if (distBetweenCyls < 50.0)
+                            continue;
+                    }
+
+                    if (cylindersFound == 0)
+                    {
+                        firstCyl_X = cx;
+                        firstCyl_Y = cy;
+                        firstCyl_Z = cz;
+                    }
+
+                    cylindersFound++;
+
+                    IpfcModelItem surfaceModelItem = (IpfcModelItem)surfaceItems[i];
+                    IpfcSession comSession = (IpfcSession)Session;
+                    IpfcSelectionBuffer selectionBuffer = comSession.CurrentSelectionBuffer;
+                    selectionBuffer.Clear();
+
+                    IpfcSelection surfaceSelection =
+                        new CMpfcSelect().CreateModelItemSelection(surfaceModelItem, null);
+                    selectionBuffer.AddSelection(surfaceSelection);
+
+                    string createAxisMacro =
+                        "~ Command `ProCmdDatumAxis` ;" +
+                        "~ Activate `Odui_Dlg_01` `stdbtn_1`;";
+
+                    Session.RunMacro(createAxisMacro);
+                    Thread.Sleep(1200);
+
+                    if (cylindersFound >= 2)
+                        break;
+                }
+
+                if (cylindersFound < 2)
+                {
+                    Console.WriteLine($"WARNING: Found only {cylindersFound} distinct cylindrical surface(s). Need 2.");
+                    return;
+                }
+
+                IpfcModelItems updatedAxes = itemOwner.ListItems(EpfcModelItemType.EpfcITEM_AXIS);
+                if (updatedAxes == null || updatedAxes.Count < initialAxisCount + 2)
+                {
+                    Console.WriteLine("ERROR: Failed to create two new axes.");
+                    return;
+                }
+
+                IpfcModelItem axisItem1 = updatedAxes[updatedAxes.Count - 2];
+                IpfcModelItem axisItem2 = updatedAxes[updatedAxes.Count - 1];
+
+               
+                IpfcSession sessionContext = (IpfcSession)Session;
+                IpfcSelectionBuffer axisBuffer = sessionContext.CurrentSelectionBuffer;
+                axisBuffer.Clear();
+
+                IpfcSelection selAxis1 = new CMpfcSelect().CreateModelItemSelection(axisItem1, null);
+                IpfcSelection selAxis2 = new CMpfcSelect().CreateModelItemSelection(axisItem2, null);
+                axisBuffer.AddSelection(selAxis1);
+                axisBuffer.AddSelection(selAxis2);
+
+                string intersectPointMacro =
+                    "~ Command `ProCmdDatumPointGeneral` ;" +
+                    "~ Activate `Odui_Dlg_00` `stdbtn_1`;";
+
+                Session.RunMacro(intersectPointMacro);
+                Thread.Sleep(2000);
+
+                IpfcModelItems pointsCollection = itemOwner.ListItems(EpfcModelItemType.EpfcITEM_POINT);
+                if (pointsCollection == null || pointsCollection.Count < 3)
+                {
+                    Console.WriteLine($"ERROR: Need at least 3 points (2 ends + bend center). Found: {pointsCollection?.Count ?? 0}");
+                    return;
+                }
+
+                IpfcModelItem pointPNT0 = pointsCollection[pointsCollection.Count - 3];
+                IpfcModelItem pointPNT1 = pointsCollection[pointsCollection.Count - 2];
+                IpfcModelItem pointZ = pointsCollection[pointsCollection.Count - 1]; // bend center
+
+             
+                IpfcSelection selZ = new CMpfcSelect().CreateModelItemSelection(pointZ, null);
+                IpfcSelection selP0 = new CMpfcSelect().CreateModelItemSelection(pointPNT0, null);
+                IpfcSelection selP1 = new CMpfcSelect().CreateModelItemSelection(pointPNT1, null);
+
+                IpfcSelectionPair pair1 = (IpfcSelectionPair)new CCpfcSelectionPair().Create(selZ, selP0);
+                IpfcSelectionEvaluator eval1 = new CMpfcInterference().CreateSelectionEvaluator(pair1);
+                double lengthSide1 = eval1.ComputeNearestCriticalDistance().Distance;
+
+                IpfcSelectionPair pair2 = (IpfcSelectionPair)new CCpfcSelectionPair().Create(selZ, selP1);
+                IpfcSelectionEvaluator eval2 = new CMpfcInterference().CreateSelectionEvaluator(pair2);
+                double lengthSide2 = eval2.ComputeNearestCriticalDistance().Distance;
+
+                double minDistance = Math.Min(lengthSide1, lengthSide2);
+                double maxDistance = Math.Max(lengthSide1, lengthSide2);
+
+                if (minDistance <= 0.0)
+                {
+                    Console.WriteLine("ERROR: Minimum pipe distance is not > 0. Check geometry / point creation.");
+                    return;
+                }
+
+                string shorterSideName = (lengthSide1 < lengthSide2)
+                    ? "Side A (Bend Center -> PNT0)"
+                    : "Side B (Bend Center -> PNT1)";
+
+                string longerSideName = (lengthSide1 >= lengthSide2)
+                    ? "Side A (Bend Center -> PNT0)"
+                    : "Side B (Bend Center -> PNT1)";
+
+                solid.Regenerate(null);
+                Session.get_CurrentWindow().Repaint();
+
+                Console.WriteLine(
+                    $"Bend center point created: {pointZ.GetName()}\n" +
+                    $"  End point A: {pointPNT0.GetName()}\n" +
+                    $"  End point B: {pointPNT1.GetName()}\n\n" +
+                    $"Length Side A (Center -> PNT0): {lengthSide1:F4}\n" +
+                    $"Length Side B (Center -> PNT1): {lengthSide2:F4}\n\n" +
+                    $">>> MINIMUM distance pipe (> 0): {minDistance:F4}  [{shorterSideName}]\n" +
+                    $"    Maximum distance pipe:       {maxDistance:F4}  [{longerSideName}]"
+                );
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("Error in createAxisAndFindMinPipeDistance: " + ex.Message);
+            }
+        }
+
+        private static double Distance(double x1, double y1, double z1, double x2, double y2, double z2)
+        {
+            return Math.Sqrt(
+                Math.Pow(x1 - x2, 2) +
+                Math.Pow(y1 - y2, 2) +
+                Math.Pow(z1 - z2, 2));
+        }
+
+        public static void Connect()
+        {
+            try
+            {
+                asc = new CCpfcAsyncConnection();
+                iac = asc.Connect(null, null, null, null);
+                Session = (IpfcBaseSession)iac.Session;
+            }
+            catch
+            {
+                Kill_Process("pfclscom");
+                Connect_2();
+            }
+        }
+
+        public static void Connect_2()
+        {
+            try
+            {
+                asc = new CCpfcAsyncConnection();
+                iac = asc.Connect(null, null, null, null);
+                Session = (IpfcBaseSession)iac.Session;
+            }
+            catch (Exception e)
+            {
+                Console.WriteLine("Error connecting Creo: " + e.Message);
+            }
+        }
+
+        private static void Kill_Process(string processName)
+        {
+            try
+            {
+                Process[] processes = Process.GetProcessesByName(processName);
+                foreach (Process process in processes)
+                    process.Kill();
+            }
+            catch { }
+        }
+    }
+}
