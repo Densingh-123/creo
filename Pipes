@@ -12,113 +12,216 @@ namespace ConsoleApp2
         public static IpfcAsyncConnection iac { get; set; }
         public static IpfcBaseSession Session { get; set; }
 
+        public class SurfaceDistanceInfo
+        {
+            public IpfcSurface Plane { get; set; }
+            public IpfcSurface Cylinder { get; set; }
+
+            public int PlaneIndex { get; set; }
+            public int CylinderIndex { get; set; }
+
+            public double Distance { get; set; }
+        }
+
         public static void Main(string[] args)
         {
             Connect();
 
             if (Session == null)
             {
-                Console.WriteLine("ERROR: Could not connect to Creo session.");
+                Console.WriteLine(
+                    "ERROR: Could not connect to Creo session.");
+
                 return;
             }
 
-            IpfcModel model = Session.CurrentModel;
+            IpfcModel model =
+                Session.CurrentModel;
+
             if (model == null)
             {
-                Console.WriteLine("ERROR: No active model.");
+                Console.WriteLine(
+                    "ERROR: No active model.");
+
                 return;
             }
 
-            Console.WriteLine("Active model: " + model.InstanceName);
+            Console.WriteLine(
+                "Active model: " + model.InstanceName);
 
+            /*
+             * Create points at the centers of the two terminal openings.
+             */
             createPointsAtEdgeCenters();
 
+            /*
+             * Create axes, create bend-center point, and calculate
+             * plane-to-cylinder distances.
+             */
             createAxisAndFindMinPipeDistance();
         }
+
+        // =====================================================================
+        // CREATE POINTS AT THE CENTERS OF THE TERMINAL OPENINGS
+        // =====================================================================
+
         public static void createPointsAtEdgeCenters()
         {
             try
             {
-                IpfcModel model = Session.CurrentModel;
-                IpfcSolid solid = (IpfcSolid)model;
-                IpfcModelItemOwner itemOwner = (IpfcModelItemOwner)model;
-                IpfcModelItems surfaceItems = itemOwner.ListItems(EpfcModelItemType.EpfcITEM_SURFACE);
-                List<double[]> endPlaneOrigins = new List<double[]>();
+                IpfcModel model =
+                    Session.CurrentModel;
+
+                IpfcModelItemOwner itemOwner =
+                    (IpfcModelItemOwner)model;
+
+                /*
+                 * Find all planar surfaces.
+                 */
+                IpfcModelItems surfaceItems =
+                    itemOwner.ListItems(
+                        EpfcModelItemType.EpfcITEM_SURFACE);
+
+                List<double[]> endPlaneOrigins =
+                    new List<double[]>();
 
                 for (int s = 0; s < surfaceItems.Count; s++)
                 {
-                    IpfcSurface surface = (IpfcSurface)surfaceItems[s];
-                    if (surface.GetSurfaceType() == (int)EpfcSurfaceType.EpfcSURFACE_PLANE)
-                    {
-                        IpfcTransformedSurface transSurf = (IpfcTransformedSurface)surface;
-                        IpfcMatrix3D planeMatrix = transSurf.CoordSys.Matrix;
+                    IpfcSurface surface =
+                        (IpfcSurface)surfaceItems[s];
 
-                        endPlaneOrigins.Add(new double[]
+                    if (surface.GetSurfaceType() !=
+                        (int)EpfcSurfaceType.EpfcSURFACE_PLANE)
+                    {
+                        continue;
+                    }
+
+                    IpfcTransformedSurface transformedSurface =
+                        (IpfcTransformedSurface)surface;
+
+                    IpfcMatrix3D planeMatrix =
+                        transformedSurface.CoordSys.Matrix;
+
+                    endPlaneOrigins.Add(
+                        new double[]
                         {
                             planeMatrix[3, 0],
                             planeMatrix[3, 1],
                             planeMatrix[3, 2]
                         });
-                    }
                 }
 
-                IpfcModelItems edgeItems = itemOwner.ListItems(EpfcModelItemType.EpfcITEM_EDGE);
+                /*
+                 * Find circular edges whose centers are located on
+                 * the terminal plane origins.
+                 */
+                IpfcModelItems edgeItems =
+                    itemOwner.ListItems(
+                        EpfcModelItemType.EpfcITEM_EDGE);
+
                 int endpointsCreated = 0;
-                double firstEnd_X = 0, firstEnd_Y = 0, firstEnd_Z = 0;
+
+                double firstEndX = 0.0;
+                double firstEndY = 0.0;
+                double firstEndZ = 0.0;
 
                 for (int i = 0; i < edgeItems.Count; i++)
                 {
-                    IpfcEdge edge = (IpfcEdge)edgeItems[i];
-                    IpfcGeomCurve geomCurve = (IpfcGeomCurve)edge;
-                    IpfcCurveDescriptor curveDesc = geomCurve.GetCurveDescriptor();
+                    IpfcEdge edge =
+                        (IpfcEdge)edgeItems[i];
 
-                    if ((int)curveDesc.GetCurveType() != (int)EpfcCurveType.EpfcCURVE_ARC)
+                    IpfcGeomCurve geomCurve =
+                        (IpfcGeomCurve)edge;
+
+                    IpfcCurveDescriptor curveDescriptor =
+                        geomCurve.GetCurveDescriptor();
+
+                    if ((int)curveDescriptor.GetCurveType() !=
+                        (int)EpfcCurveType.EpfcCURVE_ARC)
+                    {
                         continue;
+                    }
 
-                    IpfcArcDescriptor arcDesc = (IpfcArcDescriptor)curveDesc;
-                    CpfcPoint3D arcCenter = (CpfcPoint3D)arcDesc.Center;
+                    IpfcArcDescriptor arcDescriptor =
+                        (IpfcArcDescriptor)curveDescriptor;
 
-                    double cx = arcCenter[0];
-                    double cy = arcCenter[1];
-                    double cz = arcCenter[2];
+                    CpfcPoint3D arcCenter =
+                        (CpfcPoint3D)arcDescriptor.Center;
+
+                    double centerX = arcCenter[0];
+                    double centerY = arcCenter[1];
+                    double centerZ = arcCenter[2];
 
                     bool matchesEndPlane = false;
-                    foreach (var planeOrigin in endPlaneOrigins)
+
+                    foreach (double[] planeOrigin in endPlaneOrigins)
                     {
-                        double dist = Distance(cx, cy, cz, planeOrigin[0], planeOrigin[1], planeOrigin[2]);
-                        if (dist < 0.5)
+                        double distance =
+                            Distance(
+                                centerX,
+                                centerY,
+                                centerZ,
+                                planeOrigin[0],
+                                planeOrigin[1],
+                                planeOrigin[2]);
+
+                        if (distance < 0.5)
                         {
                             matchesEndPlane = true;
                             break;
                         }
                     }
+
                     if (!matchesEndPlane)
                         continue;
 
+                    /*
+                     * Avoid selecting two circular edges that are
+                     * too close to each other.
+                     */
                     if (endpointsCreated == 1)
                     {
-                        double distBetweenEnds = Distance(cx, cy, cz, firstEnd_X, firstEnd_Y, firstEnd_Z);
-                        if (distBetweenEnds < 50.0)
+                        double distanceBetweenEnds =
+                            Distance(
+                                centerX,
+                                centerY,
+                                centerZ,
+                                firstEndX,
+                                firstEndY,
+                                firstEndZ);
+
+                        if (distanceBetweenEnds < 50.0)
                             continue;
                     }
 
                     if (endpointsCreated == 0)
                     {
-                        firstEnd_X = cx;
-                        firstEnd_Y = cy;
-                        firstEnd_Z = cz;
+                        firstEndX = centerX;
+                        firstEndY = centerY;
+                        firstEndZ = centerZ;
                     }
 
                     endpointsCreated++;
 
-                    IpfcModelItem edgeModelItem = (IpfcModelItem)edgeItems[i];
-                    IpfcSession comSession = (IpfcSession)Session;
-                    IpfcSelectionBuffer selectionBuffer = comSession.CurrentSelectionBuffer;
+                    IpfcModelItem edgeModelItem =
+                        (IpfcModelItem)edgeItems[i];
+
+                    IpfcSession comSession =
+                        (IpfcSession)Session;
+
+                    IpfcSelectionBuffer selectionBuffer =
+                        comSession.CurrentSelectionBuffer;
+
                     selectionBuffer.Clear();
 
                     IpfcSelection edgeSelection =
-                        new CMpfcSelect().CreateModelItemSelection(edgeModelItem, null);
-                    selectionBuffer.AddSelection(edgeSelection);
+                        new CMpfcSelect()
+                        .CreateModelItemSelection(
+                            edgeModelItem,
+                            null);
+
+                    selectionBuffer.AddSelection(
+                        edgeSelection);
 
                     string macroCommand =
                         "~ Command `ProCmdDatumPointGeneral` ;" +
@@ -136,6 +239,7 @@ namespace ConsoleApp2
                         "~ Activate `Odui_Dlg_00` `stdbtn_1`;";
 
                     Session.RunMacro(macroCommand);
+
                     Thread.Sleep(1000);
 
                     if (endpointsCreated >= 2)
@@ -144,184 +248,722 @@ namespace ConsoleApp2
 
                 if (endpointsCreated < 2)
                 {
-                    Console.WriteLine($"WARNING: Could only create {endpointsCreated} terminal end point(s). Need 2.");
+                    Console.WriteLine(
+                        "WARNING: Could only create " +
+                        endpointsCreated +
+                        " terminal endpoint(s). Need 2.");
+
                     return;
                 }
 
-                solid.Regenerate(null);
-                Session.get_CurrentWindow().Repaint();
-                Console.WriteLine("SUCCESS: End-center points created on both terminal openings.");
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine("Error in createPointsAtEdgeCenters: " + ex.Message);
-            }
-        }
-
-        public static void createAxisAndFindMinPipeDistance()
-        {
-            try
-            {
-                IpfcModel model = Session.CurrentModel;
-                IpfcSolid solid = (IpfcSolid)model;
-                IpfcModelItemOwner itemOwner = (IpfcModelItemOwner)model;
-
-              
-                IpfcModelItems initialAxes = itemOwner.ListItems(EpfcModelItemType.EpfcITEM_AXIS);
-                int initialAxisCount = initialAxes != null ? initialAxes.Count : 0;
-
-               
-                IpfcModelItems initialPoints = itemOwner.ListItems(EpfcModelItemType.EpfcITEM_POINT);
-                int initialPointCount = initialPoints != null ? initialPoints.Count : 0;
-
-          
-                IpfcModelItems surfaceItems = itemOwner.ListItems(EpfcModelItemType.EpfcITEM_SURFACE);
-                int cylindersFound = 0;
-                double firstCyl_X = 0, firstCyl_Y = 0, firstCyl_Z = 0;
-
-                for (int i = 0; i < surfaceItems.Count; i++)
-                {
-                    IpfcSurface surface = (IpfcSurface)surfaceItems[i];
-                    if (surface.GetSurfaceType() != (int)EpfcSurfaceType.EpfcSURFACE_CYLINDER)
-                        continue;
-
-                    IpfcTransformedSurface transSurf = (IpfcTransformedSurface)surface;
-                    IpfcMatrix3D matrix = transSurf.CoordSys.Matrix;
-
-                    double cx = matrix[3, 0];
-                    double cy = matrix[3, 1];
-                    double cz = matrix[3, 2];
-
-                    if (cylindersFound == 1)
-                    {
-                        double distBetweenCyls = Distance(cx, cy, cz, firstCyl_X, firstCyl_Y, firstCyl_Z);
-                        if (distBetweenCyls < 50.0)
-                            continue;
-                    }
-
-                    if (cylindersFound == 0)
-                    {
-                        firstCyl_X = cx;
-                        firstCyl_Y = cy;
-                        firstCyl_Z = cz;
-                    }
-
-                    cylindersFound++;
-
-                    IpfcModelItem surfaceModelItem = (IpfcModelItem)surfaceItems[i];
-                    IpfcSession comSession = (IpfcSession)Session;
-                    IpfcSelectionBuffer selectionBuffer = comSession.CurrentSelectionBuffer;
-                    selectionBuffer.Clear();
-
-                    IpfcSelection surfaceSelection =
-                        new CMpfcSelect().CreateModelItemSelection(surfaceModelItem, null);
-                    selectionBuffer.AddSelection(surfaceSelection);
-
-                    string createAxisMacro =
-                        "~ Command `ProCmdDatumAxis` ;" +
-                        "~ Activate `Odui_Dlg_01` `stdbtn_1`;";
-
-                    Session.RunMacro(createAxisMacro);
-                    Thread.Sleep(1200);
-
-                    if (cylindersFound >= 2)
-                        break;
-                }
-
-                if (cylindersFound < 2)
-                {
-                    Console.WriteLine($"WARNING: Found only {cylindersFound} distinct cylindrical surface(s). Need 2.");
-                    return;
-                }
-
-                IpfcModelItems updatedAxes = itemOwner.ListItems(EpfcModelItemType.EpfcITEM_AXIS);
-                if (updatedAxes == null || updatedAxes.Count < initialAxisCount + 2)
-                {
-                    Console.WriteLine("ERROR: Failed to create two new axes.");
-                    return;
-                }
-
-                IpfcModelItem axisItem1 = updatedAxes[updatedAxes.Count - 2];
-                IpfcModelItem axisItem2 = updatedAxes[updatedAxes.Count - 1];
-
-               
-                IpfcSession sessionContext = (IpfcSession)Session;
-                IpfcSelectionBuffer axisBuffer = sessionContext.CurrentSelectionBuffer;
-                axisBuffer.Clear();
-
-                IpfcSelection selAxis1 = new CMpfcSelect().CreateModelItemSelection(axisItem1, null);
-                IpfcSelection selAxis2 = new CMpfcSelect().CreateModelItemSelection(axisItem2, null);
-                axisBuffer.AddSelection(selAxis1);
-                axisBuffer.AddSelection(selAxis2);
-
-                string intersectPointMacro =
-                    "~ Command `ProCmdDatumPointGeneral` ;" +
-                    "~ Activate `Odui_Dlg_00` `stdbtn_1`;";
-
-                Session.RunMacro(intersectPointMacro);
-                Thread.Sleep(2000);
-
-                IpfcModelItems pointsCollection = itemOwner.ListItems(EpfcModelItemType.EpfcITEM_POINT);
-                if (pointsCollection == null || pointsCollection.Count < 3)
-                {
-                    Console.WriteLine($"ERROR: Need at least 3 points (2 ends + bend center). Found: {pointsCollection?.Count ?? 0}");
-                    return;
-                }
-
-                IpfcModelItem pointPNT0 = pointsCollection[pointsCollection.Count - 3];
-                IpfcModelItem pointPNT1 = pointsCollection[pointsCollection.Count - 2];
-                IpfcModelItem pointZ = pointsCollection[pointsCollection.Count - 1]; // bend center
-
-             
-                IpfcSelection selZ = new CMpfcSelect().CreateModelItemSelection(pointZ, null);
-                IpfcSelection selP0 = new CMpfcSelect().CreateModelItemSelection(pointPNT0, null);
-                IpfcSelection selP1 = new CMpfcSelect().CreateModelItemSelection(pointPNT1, null);
-
-                IpfcSelectionPair pair1 = (IpfcSelectionPair)new CCpfcSelectionPair().Create(selZ, selP0);
-                IpfcSelectionEvaluator eval1 = new CMpfcInterference().CreateSelectionEvaluator(pair1);
-                double lengthSide1 = eval1.ComputeNearestCriticalDistance().Distance;
-
-                IpfcSelectionPair pair2 = (IpfcSelectionPair)new CCpfcSelectionPair().Create(selZ, selP1);
-                IpfcSelectionEvaluator eval2 = new CMpfcInterference().CreateSelectionEvaluator(pair2);
-                double lengthSide2 = eval2.ComputeNearestCriticalDistance().Distance;
-
-                double minDistance = Math.Min(lengthSide1, lengthSide2);
-                double maxDistance = Math.Max(lengthSide1, lengthSide2);
-
-                if (minDistance <= 0.0)
-                {
-                    Console.WriteLine("ERROR: Minimum pipe distance is not > 0. Check geometry / point creation.");
-                    return;
-                }
-
-                string shorterSideName = (lengthSide1 < lengthSide2)
-                    ? "Side A (Bend Center -> PNT0)"
-                    : "Side B (Bend Center -> PNT1)";
-
-                string longerSideName = (lengthSide1 >= lengthSide2)
-                    ? "Side A (Bend Center -> PNT0)"
-                    : "Side B (Bend Center -> PNT1)";
+                IpfcSolid solid =
+                    (IpfcSolid)model;
 
                 solid.Regenerate(null);
                 Session.get_CurrentWindow().Repaint();
 
                 Console.WriteLine(
-                    $"Bend center point created: {pointZ.GetName()}\n" +
-                    $"  End point A: {pointPNT0.GetName()}\n" +
-                    $"  End point B: {pointPNT1.GetName()}\n\n" +
-                    $"Length Side A (Center -> PNT0): {lengthSide1:F4}\n" +
-                    $"Length Side B (Center -> PNT1): {lengthSide2:F4}\n\n" +
-                    $">>> MINIMUM distance pipe (> 0): {minDistance:F4}  [{shorterSideName}]\n" +
-                    $"    Maximum distance pipe:       {maxDistance:F4}  [{longerSideName}]"
-                );
+                    "SUCCESS: End-center points created " +
+                    "on both terminal openings.");
             }
             catch (Exception ex)
             {
-                Console.WriteLine("Error in createAxisAndFindMinPipeDistance: " + ex.Message);
+                Console.WriteLine(
+                    "Error in createPointsAtEdgeCenters: " +
+                    ex.Message);
             }
         }
 
-        private static double Distance(double x1, double y1, double z1, double x2, double y2, double z2)
+        // =====================================================================
+        // MAIN AXIS AND DISTANCE METHOD
+        // =====================================================================
+
+        public static void createAxisAndFindMinPipeDistance()
+        {
+            try
+            {
+                IpfcModel model =
+                    Session.CurrentModel;
+
+                IpfcSolid solid =
+                    (IpfcSolid)model;
+
+                IpfcModelItemOwner itemOwner =
+                    (IpfcModelItemOwner)model;
+
+                /*
+                 * Store the initial number of axes.
+                 */
+                IpfcModelItems initialAxes =
+                    itemOwner.ListItems(
+                        EpfcModelItemType.EpfcITEM_AXIS);
+
+                int initialAxisCount =
+                    initialAxes != null
+                        ? initialAxes.Count
+                        : 0;
+
+                /*
+                 * Find the terminal planar surfaces.
+                 */
+                List<IpfcSurface> terminalPlanes =
+                    FindTerminalPlanes(itemOwner);
+
+                if (terminalPlanes.Count < 2)
+                {
+                    Console.WriteLine(
+                        "ERROR: Could not find two terminal planar surfaces.");
+
+                    return;
+                }
+
+                /*
+                 * Find two distinct cylindrical surfaces.
+                 */
+                List<IpfcSurface> cylinders =
+                    FindDistinctCylinders(itemOwner);
+
+                if (cylinders.Count < 2)
+                {
+                    Console.WriteLine(
+                        "ERROR: Could not find two distinct cylindrical surfaces.");
+
+                    return;
+                }
+
+                /*
+                 * Calculate plane-to-cylinder distances and select
+                 * two independent pipe sides.
+                 */
+                SurfaceDistanceInfo[] pipeSides =
+                    FindPipeSides(
+                        terminalPlanes,
+                        cylinders);
+
+                SurfaceDistanceInfo side1 =
+                    pipeSides[0];
+
+                SurfaceDistanceInfo side2 =
+                    pipeSides[1];
+
+                /*
+                 * Create an axis on the first cylindrical surface.
+                 */
+                CreateAxisFromCylinder(side1.Cylinder);
+
+                /*
+                 * Create an axis on the second cylindrical surface.
+                 */
+                CreateAxisFromCylinder(side2.Cylinder);
+
+                /*
+                 * Get the two newly created axes.
+                 */
+                IpfcModelItems updatedAxes =
+                    itemOwner.ListItems(
+                        EpfcModelItemType.EpfcITEM_AXIS);
+
+                if (updatedAxes == null ||
+                    updatedAxes.Count < initialAxisCount + 2)
+                {
+                    Console.WriteLine(
+                        "ERROR: Failed to create two new datum axes.");
+
+                    return;
+                }
+
+                IpfcModelItem axisItem1 =
+                    updatedAxes[updatedAxes.Count - 2];
+
+                IpfcModelItem axisItem2 =
+                    updatedAxes[updatedAxes.Count - 1];
+
+                /*
+                 * Select the two axes.
+                 */
+                IpfcSession sessionContext =
+                    (IpfcSession)Session;
+
+                IpfcSelectionBuffer axisBuffer =
+                    sessionContext.CurrentSelectionBuffer;
+
+                axisBuffer.Clear();
+
+                IpfcSelection axisSelection1 =
+                    new CMpfcSelect()
+                    .CreateModelItemSelection(
+                        axisItem1,
+                        null);
+
+                IpfcSelection axisSelection2 =
+                    new CMpfcSelect()
+                    .CreateModelItemSelection(
+                        axisItem2,
+                        null);
+
+                axisBuffer.AddSelection(axisSelection1);
+                axisBuffer.AddSelection(axisSelection2);
+
+                /*
+                 * Create the center point from the intersection
+                 * of the two axes.
+                 */
+                string intersectPointMacro =
+                    "~ Command `ProCmdDatumPointGeneral` ;" +
+                    "~ Activate `Odui_Dlg_00` `stdbtn_1`;";
+
+                Session.RunMacro(intersectPointMacro);
+
+                Thread.Sleep(2000);
+
+                /*
+                 * Get the three points:
+                 *
+                 * Last three points:
+                 *   pointPNT0       = first terminal point
+                 *   pointPNT1       = second terminal point
+                 *   bendCenterPoint = point created from two axes
+                 */
+                IpfcModelItems pointsCollection =
+                    itemOwner.ListItems(
+                        EpfcModelItemType.EpfcITEM_POINT);
+
+                if (pointsCollection == null ||
+                    pointsCollection.Count < 3)
+                {
+                    Console.WriteLine(
+                        "ERROR: Need at least three points " +
+                        "(two end points and one bend-center point). " +
+                        "Found: " +
+                        (pointsCollection == null
+                            ? 0
+                            : pointsCollection.Count));
+
+                    return;
+                }
+
+                IpfcModelItem pointPNT0 =
+                    pointsCollection[pointsCollection.Count - 3];
+
+                IpfcModelItem pointPNT1 =
+                    pointsCollection[pointsCollection.Count - 2];
+
+                IpfcModelItem bendCenterPoint =
+                    pointsCollection[pointsCollection.Count - 1];
+
+                /*
+                 * The distances are now calculated from:
+                 *
+                 *     terminal plane -> cylindrical surface
+                 *
+                 * instead of:
+                 *
+                 *     bend center point -> terminal point
+                 */
+                double lengthSide1 =
+             side1.Distance;
+
+                double lengthSide2 =
+                    side2.Distance;
+
+                SurfaceDistanceInfo startingPipe;
+                SurfaceDistanceInfo endingPipe;
+
+                if (lengthSide1 <= lengthSide2)
+                {
+                    startingPipe = side1;
+                    endingPipe = side2;
+                }
+                else
+                {
+                    startingPipe = side2;
+                    endingPipe = side1;
+                }
+
+                double minimumDistance =
+                    startingPipe.Distance;
+
+                double maximumDistance =
+                    endingPipe.Distance;
+
+                solid.Regenerate(null);
+                Session.get_CurrentWindow().Repaint();
+
+                Console.WriteLine(
+                    "\nSUCCESS: Axes and bend-center point created.\n" +
+
+                    "\nBend center point: " +
+                    bendCenterPoint.GetName() +
+
+                    "\nTerminal point 1: " +
+                    pointPNT0.GetName() +
+
+                    "\nTerminal point 2: " +
+                    pointPNT1.GetName() +
+
+                    "\n\nSTARTING PIPE - SHORTEST POSITIVE DISTANCE" +
+
+                    "\n  Plane index: " +
+                    startingPipe.PlaneIndex +
+
+                    "\n  Cylinder index: " +
+                    startingPipe.CylinderIndex +
+
+                    "\n  Distance: " +
+                    startingPipe.Distance.ToString("F4") +
+
+                    "\n\nENDING PIPE - LONGEST POSITIVE DISTANCE" +
+
+                    "\n  Plane index: " +
+                    endingPipe.PlaneIndex +
+
+                    "\n  Cylinder index: " +
+                    endingPipe.CylinderIndex +
+
+                    "\n  Distance: " +
+                    endingPipe.Distance.ToString("F4") +
+
+                    "\n\nMINIMUM PIPE DISTANCE / STARTING PIPE: " +
+                    minimumDistance.ToString("F4") +
+
+                    "\nMAXIMUM PIPE DISTANCE / ENDING PIPE: " +
+                    maximumDistance.ToString("F4")
+                );
+
+                if (minimumDistance <= 0.0)
+                {
+                    Console.WriteLine(
+                        "\nWARNING: The minimum plane-to-cylinder " +
+                        "distance is zero or negative. " +
+                        "This usually means that the selected plane " +
+                        "and cylindrical surface intersect or touch.");
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine(
+                    "Error in createAxisAndFindMinPipeDistance: " +
+                    ex.Message);
+            }
+        }
+
+        // =====================================================================
+        // CREATE AXIS FROM CYLINDRICAL SURFACE
+        // =====================================================================
+
+        private static void CreateAxisFromCylinder(
+            IpfcSurface cylinderSurface)
+        {
+            IpfcSession comSession =
+                (IpfcSession)Session;
+
+            IpfcSelectionBuffer selectionBuffer =
+                comSession.CurrentSelectionBuffer;
+
+            selectionBuffer.Clear();
+
+            IpfcSelection cylinderSelection =
+                new CMpfcSelect()
+                .CreateModelItemSelection(
+                    (IpfcModelItem)cylinderSurface,
+                    null);
+
+            selectionBuffer.AddSelection(
+                cylinderSelection);
+
+            string createAxisMacro =
+                "~ Command `ProCmdDatumAxis` ;" +
+                "~ Activate `Odui_Dlg_01` `stdbtn_1`;";
+
+            Session.RunMacro(createAxisMacro);
+
+            Thread.Sleep(1200);
+        }
+
+        // =====================================================================
+        // FIND TERMINAL PLANAR SURFACES
+        // =====================================================================
+
+        private static List<IpfcSurface> FindTerminalPlanes(
+            IpfcModelItemOwner itemOwner)
+        {
+            List<IpfcSurface> terminalPlanes =
+                new List<IpfcSurface>();
+
+            IpfcModelItems surfaceItems =
+                itemOwner.ListItems(
+                    EpfcModelItemType.EpfcITEM_SURFACE);
+
+            IpfcModelItems edgeItems =
+                itemOwner.ListItems(
+                    EpfcModelItemType.EpfcITEM_EDGE);
+
+            for (int s = 0; s < surfaceItems.Count; s++)
+            {
+                IpfcSurface surface =
+                    (IpfcSurface)surfaceItems[s];
+
+                if (surface.GetSurfaceType() !=
+                    (int)EpfcSurfaceType.EpfcSURFACE_PLANE)
+                {
+                    continue;
+                }
+
+                double[] planeOrigin =
+                    GetSurfaceOrigin(surface);
+
+                bool isTerminalPlane = false;
+
+                /*
+                 * Check whether an arc center lies on this plane.
+                 */
+                for (int e = 0; e < edgeItems.Count; e++)
+                {
+                    IpfcEdge edge =
+                        (IpfcEdge)edgeItems[e];
+
+                    IpfcGeomCurve geomCurve =
+                        (IpfcGeomCurve)edge;
+
+                    IpfcCurveDescriptor curveDescriptor =
+                        geomCurve.GetCurveDescriptor();
+
+                    if ((int)curveDescriptor.GetCurveType() !=
+                        (int)EpfcCurveType.EpfcCURVE_ARC)
+                    {
+                        continue;
+                    }
+
+                    IpfcArcDescriptor arcDescriptor =
+                        (IpfcArcDescriptor)curveDescriptor;
+
+                    CpfcPoint3D arcCenter =
+                        (CpfcPoint3D)arcDescriptor.Center;
+
+                    double distance =
+                        Distance(
+                            arcCenter[0],
+                            arcCenter[1],
+                            arcCenter[2],
+                            planeOrigin[0],
+                            planeOrigin[1],
+                            planeOrigin[2]);
+
+                    if (distance < 0.5)
+                    {
+                        isTerminalPlane = true;
+                        break;
+                    }
+                }
+
+                if (!isTerminalPlane)
+                    continue;
+
+                /*
+                 * Avoid adding the same plane more than once.
+                 */
+                bool alreadyAdded = false;
+
+                foreach (IpfcSurface existingPlane in terminalPlanes)
+                {
+                    double[] existingOrigin =
+                        GetSurfaceOrigin(existingPlane);
+
+                    if (Distance(
+                            planeOrigin,
+                            existingOrigin) < 0.5)
+                    {
+                        alreadyAdded = true;
+                        break;
+                    }
+                }
+
+                if (!alreadyAdded)
+                    terminalPlanes.Add(surface);
+            }
+
+            return terminalPlanes;
+        }
+
+        // =====================================================================
+        // FIND DISTINCT CYLINDRICAL SURFACES
+        // =====================================================================
+
+        private static List<IpfcSurface> FindDistinctCylinders(
+            IpfcModelItemOwner itemOwner)
+        {
+            List<IpfcSurface> cylinders =
+                new List<IpfcSurface>();
+
+            List<double[]> cylinderOrigins =
+                new List<double[]>();
+
+            IpfcModelItems surfaceItems =
+                itemOwner.ListItems(
+                    EpfcModelItemType.EpfcITEM_SURFACE);
+
+            for (int i = 0; i < surfaceItems.Count; i++)
+            {
+                IpfcSurface surface =
+                    (IpfcSurface)surfaceItems[i];
+
+                if (surface.GetSurfaceType() !=
+                    (int)EpfcSurfaceType.EpfcSURFACE_CYLINDER)
+                {
+                    continue;
+                }
+
+                double[] cylinderOrigin =
+                    GetSurfaceOrigin(surface);
+
+                bool duplicateCylinder = false;
+
+                foreach (double[] existingOrigin in cylinderOrigins)
+                {
+                    if (Distance(
+                            cylinderOrigin,
+                            existingOrigin) < 50.0)
+                    {
+                        duplicateCylinder = true;
+                        break;
+                    }
+                }
+
+                if (duplicateCylinder)
+                    continue;
+
+                cylinders.Add(surface);
+                cylinderOrigins.Add(cylinderOrigin);
+            }
+
+            return cylinders;
+        }
+
+        // =====================================================================
+        // FIND THE TWO PLANE-TO-CYLINDER PIPE SIDES
+        // =====================================================================
+
+        private static SurfaceDistanceInfo[] FindPipeSides(
+        List<IpfcSurface> terminalPlanes,
+        List<IpfcSurface> cylinders)
+        {
+            const double minimumValidDistance = 0.000001;
+
+            List<SurfaceDistanceInfo> positiveCandidates =
+                new List<SurfaceDistanceInfo>();
+
+            /*
+             * Calculate every plane-to-cylinder distance.
+             *
+             * Plane and cylinder belonging to the same pipe side may
+             * intersect at the terminal opening and return zero.
+             * Those combinations are ignored.
+             */
+            for (int p = 0; p < terminalPlanes.Count; p++)
+            {
+                for (int c = 0; c < cylinders.Count; c++)
+                {
+                    double distance =
+                        GetSurfaceDistance(
+                            terminalPlanes[p],
+                            cylinders[c]);
+
+                    if (double.IsNaN(distance) ||
+                        double.IsInfinity(distance))
+                    {
+                        continue;
+                    }
+
+                    /*
+                     * Ignore zero or almost-zero distances.
+                     */
+                    if (distance <= minimumValidDistance)
+                    {
+                        continue;
+                    }
+
+                    positiveCandidates.Add(
+                        new SurfaceDistanceInfo
+                        {
+                            Plane = terminalPlanes[p],
+                            Cylinder = cylinders[c],
+                            PlaneIndex = p,
+                            CylinderIndex = c,
+                            Distance = distance
+                        });
+                }
+            }
+
+            if (positiveCandidates.Count < 2)
+            {
+                throw new Exception(
+                    "No two positive plane-to-cylinder distances were found. " +
+                    "The selected planes and cylinders may intersect.");
+            }
+
+            /*
+             * Sort from shortest positive distance to longest positive distance.
+             */
+            positiveCandidates.Sort(
+                delegate (
+                    SurfaceDistanceInfo first,
+                    SurfaceDistanceInfo second)
+                {
+                    return first.Distance.CompareTo(second.Distance);
+                });
+
+            SurfaceDistanceInfo startingPipe = null;
+            SurfaceDistanceInfo endingPipe = null;
+
+            /*
+             * Select the shortest valid distance and the longest
+             * compatible distance.
+             *
+             * The plane and cylinder must not be reused in the same pair.
+             */
+            for (int i = 0; i < positiveCandidates.Count; i++)
+            {
+                SurfaceDistanceInfo shortestCandidate =
+                    positiveCandidates[i];
+
+                for (int j = positiveCandidates.Count - 1; j > i; j--)
+                {
+                    SurfaceDistanceInfo longestCandidate =
+                        positiveCandidates[j];
+
+                    /*
+                     * Do not use the same terminal plane twice.
+                     */
+                    if (shortestCandidate.PlaneIndex ==
+                        longestCandidate.PlaneIndex)
+                    {
+                        continue;
+                    }
+
+                    /*
+                     * Do not use the same cylindrical surface twice.
+                     */
+                    if (shortestCandidate.CylinderIndex ==
+                        longestCandidate.CylinderIndex)
+                    {
+                        continue;
+                    }
+
+                    startingPipe = shortestCandidate;
+                    endingPipe = longestCandidate;
+
+                    break;
+                }
+
+                if (startingPipe != null &&
+                    endingPipe != null)
+                {
+                    break;
+                }
+            }
+
+            if (startingPipe == null ||
+                endingPipe == null)
+            {
+                throw new Exception(
+                    "Could not find two independent positive " +
+                    "plane-to-cylinder distances.");
+            }
+
+            return new SurfaceDistanceInfo[]
+            {
+        startingPipe,
+        endingPipe
+            };
+        }
+        // =====================================================================
+        // CALCULATE DISTANCE BETWEEN TWO SURFACES
+        // =====================================================================
+
+        private static double GetSurfaceDistance(
+      IpfcSurface planeSurface,
+      IpfcSurface cylinderSurface)
+        {
+            IpfcModelItem planeModelItem =
+                (IpfcModelItem)planeSurface;
+
+            IpfcModelItem cylinderModelItem =
+                (IpfcModelItem)cylinderSurface;
+
+            IpfcSelection planeSelection =
+                new CMpfcSelect()
+                .CreateModelItemSelection(
+                    planeModelItem,
+                    null);
+
+            IpfcSelection cylinderSelection =
+                new CMpfcSelect()
+                .CreateModelItemSelection(
+                    cylinderModelItem,
+                    null);
+
+            IpfcSelectionPair selectionPair =
+                (IpfcSelectionPair)
+                new CCpfcSelectionPair()
+                .Create(
+                    planeSelection,
+                    cylinderSelection);
+
+            IpfcSelectionEvaluator evaluator =
+                new CMpfcInterference()
+                .CreateSelectionEvaluator(
+                    selectionPair);
+
+            return evaluator
+                .ComputeNearestCriticalDistance()
+                .Distance;
+        }
+
+        // =====================================================================
+        // GET SURFACE COORDINATE SYSTEM ORIGIN
+        // =====================================================================
+
+        private static double[] GetSurfaceOrigin(
+            IpfcSurface surface)
+        {
+            IpfcTransformedSurface transformedSurface =
+                (IpfcTransformedSurface)surface;
+
+            IpfcMatrix3D matrix =
+                transformedSurface.CoordSys.Matrix;
+
+            return new double[]
+            {
+                matrix[3, 0],
+                matrix[3, 1],
+                matrix[3, 2]
+            };
+        }
+
+        // =====================================================================
+        // DISTANCE METHODS
+        // =====================================================================
+
+        private static double Distance(
+            double[] point1,
+            double[] point2)
+        {
+            return Distance(
+                point1[0],
+                point1[1],
+                point1[2],
+                point2[0],
+                point2[1],
+                point2[2]);
+        }
+
+        private static double Distance(
+            double x1,
+            double y1,
+            double z1,
+            double x2,
+            double y2,
+            double z2)
         {
             return Math.Sqrt(
                 Math.Pow(x1 - x2, 2) +
@@ -329,13 +971,26 @@ namespace ConsoleApp2
                 Math.Pow(z1 - z2, 2));
         }
 
+        // =====================================================================
+        // CREO CONNECTION
+        // =====================================================================
+
         public static void Connect()
         {
             try
             {
-                asc = new CCpfcAsyncConnection();
-                iac = asc.Connect(null, null, null, null);
-                Session = (IpfcBaseSession)iac.Session;
+                asc =
+                    new CCpfcAsyncConnection();
+
+                iac =
+                    asc.Connect(
+                        null,
+                        null,
+                        null,
+                        null);
+
+                Session =
+                    (IpfcBaseSession)iac.Session;
             }
             catch
             {
@@ -348,25 +1003,45 @@ namespace ConsoleApp2
         {
             try
             {
-                asc = new CCpfcAsyncConnection();
-                iac = asc.Connect(null, null, null, null);
-                Session = (IpfcBaseSession)iac.Session;
+                asc =
+                    new CCpfcAsyncConnection();
+
+                iac =
+                    asc.Connect(
+                        null,
+                        null,
+                        null,
+                        null);
+
+                Session =
+                    (IpfcBaseSession)iac.Session;
             }
             catch (Exception e)
             {
-                Console.WriteLine("Error connecting Creo: " + e.Message);
+                Console.WriteLine(
+                    "Error connecting Creo: " +
+                    e.Message);
             }
         }
 
-        private static void Kill_Process(string processName)
+        private static void Kill_Process(
+            string processName)
         {
             try
             {
-                Process[] processes = Process.GetProcessesByName(processName);
+                Process[] processes =
+                    Process.GetProcessesByName(
+                        processName);
+
                 foreach (Process process in processes)
+                {
                     process.Kill();
+                }
             }
-            catch { }
+            catch
+            {
+                // Ignore process termination errors.
+            }
         }
     }
 }
