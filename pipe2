@@ -299,82 +299,35 @@ namespace ConsoleApp2
             else
             {
                 AssignCylinder(terminalSides[0],cylinders[1]);
-
                 AssignCylinder(terminalSides[1],cylinders[0]);
             }
         }
-        private static void AssignCylinder(
-            TerminalSide side,
-            CylinderInfo cylinder)
+        private static void AssignCylinder(TerminalSide side,CylinderInfo cylinder)
         {
-            side.Cylinder =
-                cylinder.Surface;
-
-            side.CylinderArea =
-                cylinder.Area;
-
-            side.CylinderIndex =
-                cylinder.Index;
+            side.Cylinder =cylinder.Surface;
+            side.CylinderArea =cylinder.Area;
+            side.CylinderIndex =cylinder.Index;
         }
-        private static void CreateAxisFromCylinder(
-            IpfcSurface cylinderSurface)
+        private static void CreateAxisFromCylinder(IpfcSurface cylinderSurface)
         {
-            IpfcSession creoSession =
-                (IpfcSession)Session;
-
-            IpfcSelectionBuffer selectionBuffer =
-                creoSession.CurrentSelectionBuffer;
-
+            IpfcSession creoSession =(IpfcSession)Session;
+            IpfcSelectionBuffer selectionBuffer = creoSession.CurrentSelectionBuffer;
             selectionBuffer.Clear();
-
-            IpfcSelection cylinderSelection =
-                new CMpfcSelect()
-                .CreateModelItemSelection(
-                    (IpfcModelItem)cylinderSurface,
-                    null);
-
-            selectionBuffer.AddSelection(
-                cylinderSelection);
-
-            string createAxisMacro =
-                "~ Command `ProCmdDatumAxis` ;" +
-                "~ Activate `Odui_Dlg_01` `stdbtn_1`;";
-
-            Session.RunMacro(
-                createAxisMacro);
-
+            IpfcSelection cylinderSelection =new CMpfcSelect().CreateModelItemSelection((IpfcModelItem)cylinderSurface,null);
+            selectionBuffer.AddSelection(cylinderSelection);
+            string createAxisMacro = "~ Command `ProCmdDatumAxis` ;" +"~ Activate `Odui_Dlg_01` `stdbtn_1`;";
+            Session.RunMacro( createAxisMacro);
             Thread.Sleep(1200);
         }
-        private static IpfcModelItem CreateDatumPointAtEdgeCenter(
-            IpfcModelItemOwner itemOwner,
-            IpfcEdge edge)
+        private static IpfcModelItem CreateDatumPointAtEdgeCenter(IpfcModelItemOwner itemOwner,IpfcEdge edge)
         {
-            IpfcSession creoSession =
-                (IpfcSession)Session;
-
-            IpfcSelectionBuffer selectionBuffer =
-                creoSession.CurrentSelectionBuffer;
-
+            IpfcSession creoSession =(IpfcSession)Session;
+            IpfcSelectionBuffer selectionBuffer = creoSession.CurrentSelectionBuffer;
             selectionBuffer.Clear();
-
-            IpfcSelection edgeSelection =
-                new CMpfcSelect()
-                .CreateModelItemSelection(
-                    (IpfcModelItem)edge,
-                    null);
-
-            selectionBuffer.AddSelection(
-                edgeSelection);
-
-            IpfcModelItems pointsBefore =
-                itemOwner.ListItems(
-                    EpfcModelItemType.EpfcITEM_POINT);
-
-            int pointCountBefore =
-                pointsBefore == null
-                    ? 0
-                    : pointsBefore.Count;
-
+            IpfcSelection edgeSelection =new CMpfcSelect().CreateModelItemSelection((IpfcModelItem)edge,null);
+            selectionBuffer.AddSelection(edgeSelection);
+            IpfcModelItems pointsBefore =itemOwner.ListItems(EpfcModelItemType.EpfcITEM_POINT);
+            int pointCountBefore = pointsBefore == null? 0 : pointsBefore.Count;
             string pointMacro =
                 "~ Command `ProCmdDatumPointGeneral` ;" +
                 "~ Trigger `Odui_Dlg_00` `t1.RefsTable` 2 `0` `c2`;" +
@@ -389,102 +342,47 @@ namespace ConsoleApp2
                 "~ Select `Odui_Dlg_00` `ConstrTypeOptionMenu_OPTMENU1` 1 `DTMPNT_CONSTR_TYPE_CENTER`;" +
                 "~ FocusOut `Odui_Dlg_00` `t1.RefsTable`;" +
                 "~ Activate `Odui_Dlg_00` `stdbtn_1`;";
-
-            Session.RunMacro(
-                pointMacro);
-
+            Session.RunMacro(pointMacro);
             Thread.Sleep(1200);
-
-            IpfcModelItems pointsAfter =
-                itemOwner.ListItems(
-                    EpfcModelItemType.EpfcITEM_POINT);
-
-            if (pointsAfter == null ||
-                pointsAfter.Count <= pointCountBefore)
+            IpfcModelItems pointsAfter =itemOwner.ListItems(EpfcModelItemType.EpfcITEM_POINT);
+            if (pointsAfter == null ||pointsAfter.Count <= pointCountBefore)
             {
                 return null;
             }
-
-            return pointsAfter[
-                pointsAfter.Count - 1];
+            return pointsAfter[pointsAfter.Count - 1];
         }
-        private static double GetSelectionDistance(
-            IpfcModelItem item1,
-            IpfcModelItem item2)
+        private static double GetSelectionDistance(IpfcModelItem item1,IpfcModelItem item2)
         {
-            IpfcSelection selection1 =
-                new CMpfcSelect()
-                .CreateModelItemSelection(
-                    item1,
-                    null);
-
-            IpfcSelection selection2 =
-                new CMpfcSelect()
-                .CreateModelItemSelection(
-                    item2,
-                    null);
-
-            IpfcSelectionPair pair =
-                (IpfcSelectionPair)
-                new CCpfcSelectionPair()
-                .Create(
-                    selection1,
-                    selection2);
-
-            IpfcSelectionEvaluator evaluator =
-                new CMpfcInterference()
-                .CreateSelectionEvaluator(
-                    pair);
-
-            double distance =
-                evaluator
-                .ComputeNearestCriticalDistance()
-                .Distance;
-
-            if (double.IsNaN(distance) ||
-                double.IsInfinity(distance))
+            IpfcSelection selection1 = new CMpfcSelect().CreateModelItemSelection(item1,null);
+            IpfcSelection selection2 =new CMpfcSelect().CreateModelItemSelection( item2,null);
+            IpfcSelectionPair pair =(IpfcSelectionPair) new CCpfcSelectionPair().Create(selection1,selection2);
+            IpfcSelectionEvaluator evaluator =new CMpfcInterference() .CreateSelectionEvaluator( pair);
+            double distance =evaluator.ComputeNearestCriticalDistance().Distance;
+            if (double.IsNaN(distance) ||double.IsInfinity(distance))
             {
                 return 0.0;
             }
-
             return Math.Abs(distance);
         }
-        private static double GetSurfaceDistance(
-            IpfcSurface planeSurface,
-            IpfcSurface cylinderSurface)
+        private static double GetSurfaceDistance(IpfcSurface planeSurface,IpfcSurface cylinderSurface)
         {
-            return GetSelectionDistance(
-                (IpfcModelItem)planeSurface,
-                (IpfcModelItem)cylinderSurface);
+            return GetSelectionDistance((IpfcModelItem)planeSurface,(IpfcModelItem)cylinderSurface);
         }
-
-        private static double GetSafeSurfaceDistance(
-            IpfcSurface planeSurface,
-            IpfcSurface cylinderSurface)
+        private static double GetSafeSurfaceDistance(IpfcSurface planeSurface, IpfcSurface cylinderSurface)
         {
             try
             {
-                return GetSurfaceDistance(
-                    planeSurface,
-                    cylinderSurface);
+                return GetSurfaceDistance(planeSurface,cylinderSurface);
             }
             catch
             {
                 return double.MaxValue;
             }
         }
-
-       
-
-        private static double[] GetSurfaceOrigin(
-            IpfcSurface surface)
+        private static double[] GetSurfaceOrigin(IpfcSurface surface)
         {
-            IpfcTransformedSurface transformedSurface =
-                (IpfcTransformedSurface)surface;
-
-            IpfcMatrix3D matrix =
-                transformedSurface.CoordSys.Matrix;
-
+            IpfcTransformedSurface transformedSurface =(IpfcTransformedSurface)surface;
+            IpfcMatrix3D matrix =transformedSurface.CoordSys.Matrix;
             return new double[]
             {
                 matrix[3, 0],
@@ -492,9 +390,7 @@ namespace ConsoleApp2
                 matrix[3, 2]
             };
         }
-        private static double Distance(
-            double[] point1,
-            double[] point2)
+        private static double Distance(double[] point1,double[] point2)
         {
             return Distance(
                 point1[0],
@@ -505,35 +401,17 @@ namespace ConsoleApp2
                 point2[2]);
         }
 
-        private static double Distance(
-            double x1,
-            double y1,
-            double z1,
-            double x2,
-            double y2,
-            double z2)
+        private static double Distance(double x1,double y1,double z1,double x2, double y2, double z2)
         {
-            return Math.Sqrt(
-                Math.Pow(x1 - x2, 2.0) +
-                Math.Pow(y1 - y2, 2.0) +
-                Math.Pow(z1 - z2, 2.0));
+            return Math.Sqrt(Math.Pow(x1 - x2, 2.0) +Math.Pow(y1 - y2, 2.0) +Math.Pow(z1 - z2, 2.0));
         }
         public static void Connect()
         {
             try
             {
-                asc =
-                    new CCpfcAsyncConnection();
-
-                iac =
-                    asc.Connect(
-                        null,
-                        null,
-                        null,
-                        null);
-
-                Session =
-                    (IpfcBaseSession)iac.Session;
+                asc =new CCpfcAsyncConnection();
+                iac =asc.Connect(null, null,null,null);
+                Session=(IpfcBaseSession)iac.Session;
             }
             catch
             {
@@ -541,23 +419,13 @@ namespace ConsoleApp2
                 Connect_2();
             }
         }
-
         public static void Connect_2()
         {
             try
             {
-                asc =
-                    new CCpfcAsyncConnection();
-
-                iac =
-                    asc.Connect(
-                        null,
-                        null,
-                        null,
-                        null);
-
-                Session =
-                    (IpfcBaseSession)iac.Session;
+                asc = new CCpfcAsyncConnection();
+                iac = asc.Connect(null, null, null, null);
+                Session = (IpfcBaseSession)iac.Session;
             }
             catch (Exception ex)
             {
@@ -566,24 +434,18 @@ namespace ConsoleApp2
                     ex.Message);
             }
         }
-
-        private static void Kill_Process(
-            string processName)
+        private static void Kill_Process(string processName)
         {
             try
             {
-                Process[] processes =
-                    Process.GetProcessesByName(
-                        processName);
-
+                Process[] processes =Process.GetProcessesByName(processName);
                 foreach (Process process in processes)
                 {
                     process.Kill();
                 }
             }
             catch
-            {
-                
+            { 
             }
         }
     }
