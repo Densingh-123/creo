@@ -37,8 +37,6 @@ namespace ConsoleApp2
             public int CylinderIndex { get; set; }
 
             public double CylinderArea { get; set; }
-
-            // This is calculated before datum point creation.
             public double PipeDistance { get; set; }
         }
 
@@ -73,35 +71,21 @@ namespace ConsoleApp2
                 IpfcSolid solid = (IpfcSolid)model;
                 IpfcModelItemOwner itemOwner = (IpfcModelItemOwner)model;
 
-                IpfcModelItems initialAxes =
-                    itemOwner.ListItems(EpfcModelItemType.EpfcITEM_AXIS);
+                IpfcModelItems initialAxes =itemOwner.ListItems(EpfcModelItemType.EpfcITEM_AXIS);
 
-                int initialAxisCount =
-                    initialAxes == null ? 0 : initialAxes.Count;
+                int initialAxisCount =initialAxes == null ? 0 : initialAxes.Count;
 
-                IpfcModelItems initialPoints =
-                    itemOwner.ListItems(EpfcModelItemType.EpfcITEM_POINT);
+                IpfcModelItems initialPoints =itemOwner.ListItems(EpfcModelItemType.EpfcITEM_POINT);
 
-                int initialPointCount =
-                    initialPoints == null ? 0 : initialPoints.Count;
-
-                /*
-                 * Find the two terminal planes and their circular edge contours.
-                 */
-                List<TerminalSide> terminalSides =
-                    FindTerminalSides(itemOwner);
+                int initialPointCount = initialPoints == null ? 0 : initialPoints.Count;
+                List<TerminalSide> terminalSides =FindTerminalSides(itemOwner);
 
                 if (terminalSides.Count < 2)
                 {
-                    Console.WriteLine(
-                        "ERROR: Could not find two terminal planes with circular edges.");
+                    Console.WriteLine("ERROR: Could not find two terminal planes with circular edges.");
 
                     return;
                 }
-
-                /*
-                 * Find the cylindrical surfaces.
-                 */
                 List<CylinderInfo> cylinders =
                     FindDistinctCylinders(itemOwner);
 
@@ -112,10 +96,6 @@ namespace ConsoleApp2
 
                     return;
                 }
-
-                /*
-                 * Keep your existing cylinder-to-terminal matching logic.
-                 */
                 MatchCylindersToTerminalSides(terminalSides, cylinders);
 
                 if (terminalSides[0].Cylinder == null ||
@@ -126,31 +106,11 @@ namespace ConsoleApp2
 
                     return;
                 }
-
-                /*
-                 * NEW LOGIC
-                 *
-                 * Calculate both pipe distances from the circular contour
-                 * centers before creating STARTPOINT.
-                 */
                 for (int i = 0; i < terminalSides.Count; i++)
                 {
-                    terminalSides[i].PipeDistance =
-                        GetPipeDistanceFromContour(
-                            itemOwner,
-                            terminalSides[i]);
-
-                    Console.WriteLine(
-                        "Terminal side " +
-                        (i + 1) +
-                        " contour pipe distance: " +
-                        terminalSides[i].PipeDistance.ToString("F4"));
+                    terminalSides[i].PipeDistance =GetPipeDistanceFromContour(itemOwner,terminalSides[i]);
+                    Console.WriteLine("Terminal side " +(i + 1) + " contour pipe distance: " +terminalSides[i].PipeDistance.ToString("F4"));
                 }
-
-                /*
-                 * The side with the smaller pipe distance becomes the
-                 * STARTPOINT side.
-                 */
                 TerminalSide startingSide;
                 TerminalSide endingSide;
 
@@ -647,62 +607,37 @@ namespace ConsoleApp2
         }
 
       
-        private static double GetPipeDistanceFromContour(
-            IpfcModelItemOwner itemOwner,
-            TerminalSide side)
+        private static double GetPipeDistanceFromContour(IpfcModelItemOwner itemOwner,TerminalSide side)
         {
-            if (side == null ||
-                side.Cylinder == null ||
-                side.EdgeCenter == null)
+            if (side == null ||side.Cylinder == null ||side.EdgeCenter == null)
             {
                 return double.MaxValue;
             }
 
-            double[] cylinderOrigin =
-                GetSurfaceOrigin(side.Cylinder);
+            double[] cylinderOrigin = GetSurfaceOrigin(side.Cylinder);
 
-            double[] cylinderAxis =
-                GetCylinderAxis(side.Cylinder);
+            double[] cylinderAxis =GetCylinderAxis(side.Cylinder);
 
             if (cylinderAxis == null)
             {
                 return double.MaxValue;
             }
 
-            List<double[]> contourCenters =
-                GetCircularContourCenters(itemOwner);
-
+            List<double[]> contourCenters =GetCircularContourCenters(itemOwner);
             double maximumAxialDistance = 0.0;
             bool foundContour = false;
 
             foreach (double[] contourCenter in contourCenters)
             {
-                double distanceFromCylinderAxis =
-                    DistancePointToAxis(
-                        contourCenter,
-                        cylinderOrigin,
-                        cylinderAxis);
+                double distanceFromCylinderAxis = DistancePointToAxis(contourCenter,cylinderOrigin,cylinderAxis);
 
-                /*
-                 * Only use circular contours that lie on the current
-                 * cylindrical surface axis.
-                 */
                 if (distanceFromCylinderAxis > PLANE_TOLERANCE)
                 {
                     continue;
                 }
 
-                double[] centerDifference =
-                    Subtract(
-                        contourCenter,
-                        side.EdgeCenter);
-
-                double axialDistance =
-                    Math.Abs(
-                        Dot(
-                            centerDifference,
-                            cylinderAxis));
-
+                double[] centerDifference =Subtract(contourCenter,side.EdgeCenter);
+                double axialDistance = Math.Abs(Dot(centerDifference,cylinderAxis));
                 if (axialDistance > maximumAxialDistance)
                 {
                     maximumAxialDistance = axialDistance;
@@ -710,28 +645,10 @@ namespace ConsoleApp2
 
                 foundContour = true;
             }
-
-            /*
-             * Fallback if only one contour was found.
-             *
-             * This uses the cylinder coordinate system origin. It is
-             * retained only as a fallback and does not affect the normal
-             * contour calculation.
-             */
-            if (!foundContour ||
-                maximumAxialDistance <= DISTANCE_TOLERANCE)
+            if (!foundContour || maximumAxialDistance <= DISTANCE_TOLERANCE)
             {
-                double[] originDifference =
-                    Subtract(
-                        cylinderOrigin,
-                        side.EdgeCenter);
-
-                double fallbackDistance =
-                    Math.Abs(
-                        Dot(
-                            originDifference,
-                            cylinderAxis));
-
+                double[] originDifference = Subtract(cylinderOrigin,side.EdgeCenter);
+                double fallbackDistance = Math.Abs(Dot(originDifference,cylinderAxis));
                 if (fallbackDistance > maximumAxialDistance)
                 {
                     maximumAxialDistance = fallbackDistance;
@@ -740,18 +657,10 @@ namespace ConsoleApp2
 
             return maximumAxialDistance;
         }
-
-        /*
-         * Gets the circular contour centers from all model edges.
-         */
-        private static List<double[]> GetCircularContourCenters(
-            IpfcModelItemOwner itemOwner)
+        private static List<double[]> GetCircularContourCenters(IpfcModelItemOwner itemOwner)
         {
-            List<double[]> centers =
-                new List<double[]>();
-
-            IpfcModelItems edgeItems =
-                itemOwner.ListItems(EpfcModelItemType.EpfcITEM_EDGE);
+            List<double[]> centers =new List<double[]>();
+            IpfcModelItems edgeItems =itemOwner.ListItems(EpfcModelItemType.EpfcITEM_EDGE);
 
             if (edgeItems == null)
             {
@@ -762,26 +671,18 @@ namespace ConsoleApp2
             {
                 try
                 {
-                    IpfcEdge edge =
-                        (IpfcEdge)edgeItems[i];
+                    IpfcEdge edge =(IpfcEdge)edgeItems[i];
+                    IpfcGeomCurve geomCurve =(IpfcGeomCurve)edge;
+                    IpfcCurveDescriptor curveDescriptor =geomCurve.GetCurveDescriptor();
 
-                    IpfcGeomCurve geomCurve =
-                        (IpfcGeomCurve)edge;
-
-                    IpfcCurveDescriptor curveDescriptor =
-                        geomCurve.GetCurveDescriptor();
-
-                    if ((int)curveDescriptor.GetCurveType() !=
-                        (int)EpfcCurveType.EpfcCURVE_ARC)
+                    if ((int)curveDescriptor.GetCurveType() !=(int)EpfcCurveType.EpfcCURVE_ARC)
                     {
                         continue;
                     }
 
-                    IpfcArcDescriptor arcDescriptor =
-                        (IpfcArcDescriptor)curveDescriptor;
+                    IpfcArcDescriptor arcDescriptor =(IpfcArcDescriptor)curveDescriptor;
 
-                    CpfcPoint3D center =
-                        (CpfcPoint3D)arcDescriptor.Center;
+                    CpfcPoint3D center =(CpfcPoint3D)arcDescriptor.Center;
 
                     double[] point =
                         new double[]
@@ -795,9 +696,7 @@ namespace ConsoleApp2
 
                     foreach (double[] existingCenter in centers)
                     {
-                        if (Distance(
-                                point,
-                                existingCenter) < DISTANCE_TOLERANCE)
+                        if (Distance(point,existingCenter) < DISTANCE_TOLERANCE)
                         {
                             duplicate = true;
                             break;
@@ -1189,9 +1088,7 @@ namespace ConsoleApp2
         {
             try
             {
-                Process[] processes =
-                    Process.GetProcessesByName(
-                        processName);
+                Process[] processes =Process.GetProcessesByName(processName);
 
                 foreach (Process process in processes)
                 {
