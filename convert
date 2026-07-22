@@ -1,0 +1,90 @@
+using System;
+using System.IO;
+using System.Security;
+using System.Text;
+
+namespace cgm_to_svg_Converter
+{
+    class Program
+    {
+        static void Main(string[] args)
+        {
+            string inputFile = @"C:\CGM\Input\sample.cgm";
+            string outputFile = @"C:\CGM\Output\sample.svg";
+
+            Console.WriteLine("Input : " + inputFile);
+            Console.WriteLine("Output: " + outputFile);
+
+            // TODO: Read the CGM file here
+            byte[] cgmData = File.ReadAllBytes(inputFile);
+
+            SvgWriter svg = new SvgWriter(800, 600);
+
+            // Example drawing (replace with actual CGM parsing)
+            svg.Polyline(
+                new int[] { 100, 200, 300, 400 },
+                new int[] { 100, 50, 200, 100 });
+
+            svg.Circle(250, 250, 75);
+            svg.Text(100, 350, "Converted from CGM");
+
+            File.WriteAllText(outputFile, svg.Build());
+
+            Console.WriteLine("Conversion completed.");
+            Console.ReadKey();
+        }
+    }
+
+    public class SvgWriter
+    {
+        private StringBuilder _sb;
+
+        public SvgWriter(int width, int height)
+        {
+            _sb = new StringBuilder();
+
+            _sb.AppendLine("<?xml version=\"1.0\" encoding=\"UTF-8\"?>");
+            _sb.AppendLine("<svg xmlns=\"http://www.w3.org/2000/svg\"");
+            _sb.AppendLine("     width=\"" + width + "\"");
+            _sb.AppendLine("     height=\"" + height + "\"");
+            _sb.AppendLine("     viewBox=\"0 0 " + width + " " + height + "\">");
+        }
+
+        public void Polyline(int[] x, int[] y)
+        {
+            _sb.Append("<polyline points=\"");
+
+            for (int i = 0; i < x.Length; i++)
+            {
+                _sb.Append(x[i] + "," + y[i] + " ");
+            }
+
+            _sb.AppendLine("\" fill=\"none\" stroke=\"black\" stroke-width=\"2\" />");
+        }
+
+        public void Circle(int x, int y, int r)
+        {
+            _sb.AppendLine(
+                "<circle cx=\"" + x +
+                "\" cy=\"" + y +
+                "\" r=\"" + r +
+                "\" fill=\"none\" stroke=\"red\" stroke-width=\"2\" />");
+        }
+
+        public void Text(int x, int y, string text)
+        {
+            _sb.AppendLine(
+                "<text x=\"" + x +
+                "\" y=\"" + y +
+                "\" font-size=\"20\" fill=\"black\">" +
+                SecurityElement.Escape(text) +
+                "</text>");
+        }
+
+        public string Build()
+        {
+            _sb.AppendLine("</svg>");
+            return _sb.ToString();
+        }
+    }
+}
