@@ -1,0 +1,922 @@
+using System;
+using System.Collections.Generic;
+using System.Collections.ObjectModel;
+using System.ComponentModel;
+using System.IO;
+using System.Linq;
+using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Input;
+using System.Windows.Media;
+using System.Windows.Threading;
+
+// ============================================================
+// IMPORTANT SETUP INSTRUCTIONS:
+// ============================================================
+// 1. Install Creo Parametric with VB API support enabled.
+// 2. In Visual Studio, right-click References > Add Reference >
+//    COM tab > Select "PTC Creo Parametric VB API Type Library"
+//    (or search for "pfcls" / "PTC" in the COM list).
+// 3. The interop namespace will be "pfcls". Add the using below.
+// ============================================================
+// Uncomment the line below AFTER adding the Creo COM reference:
+// using pfcls;
+
+namespace AGCE_Planetory_RingApp
+{
+    /// <summary>
+    /// Represents a parameter name-value pair for the UI list.
+    /// </summary>
+    public class ParameterItem : INotifyPropertyChanged
+    {
+        private string _paramName;
+        private string _paramValue;
+
+        public string ParamName
+        {
+            get => _paramName;
+            set { _paramName = value; OnPropertyChanged(nameof(ParamName)); }
+        }
+
+        public string ParamValue
+        {
+            get => _paramValue;
+            set { _paramValue = value; OnPropertyChanged(nameof(ParamValue)); }
+        }
+
+        public ICommand RemoveCommand { get; set; }
+
+        public event PropertyChangedEventHandler PropertyChanged;
+        protected void OnPropertyChanged(string name) =>
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
+    }
+
+    /// <summary>
+    /// Interaction logic for MainWindow.xaml
+    /// </summary>
+    public partial class MainWindow : Window
+    {
+        // ======================================================
+        // Creo API objects (dynamic allows mock + real API use)
+        // ======================================================
+        private dynamic _asyncConnection;
+        private dynamic _session;
+        private dynamic _drawing;
+        private dynamic _solidModel;
+
+        private ObservableCollection<ParameterItem> _parameters;
+
+        public MainWindow()
+        {
+            InitializeComponent();
+
+            // Initialize default parameters
+            _parameters = new ObservableCollection<ParameterItem>
+            {
+                new ParameterItem { ParamName = "DESCRIPTION" },
+                new ParameterItem { ParamName = "MATERIAL" },
+                new ParameterItem { ParamName = "DRAWING_NUMBER" },
+                new ParameterItem { ParamName = "REVISION" },
+                new ParameterItem { ParamName = "WEIGHT" },
+                new ParameterItem { ParamName = "COMPANY" }
+            };
+
+            // Wire up remove commands
+            foreach (var item in _parameters)
+            {
+                item.RemoveCommand = new RelayCommand<ParameterItem>(RemoveParameter);
+            }
+
+            paramItemsControl.ItemsSource = _parameters;
+        }
+
+        // ==================== UI EVENT HANDLERS ====================
+
+        /// <summary>
+        /// Browse for a Creo part (.prt) or assembly (.asm) file.
+        /// </summary>
+        private void btnBrowse_Click(object sender, RoutedEventArgs e)
+        {
+            var dialog = new Microsoft.Win32.OpenFileDialog
+            {
+                Title = "Select Creo Part or Assembly File",
+                Filter = "Creo Files (*.prt;*.asm)|*.prt;*.asm|Part Files (*.prt)|*.prt|Assembly Files (*.asm)|*.asm|All Files (*.*)|*.*",
+                Multiselect = false,
+                CheckFileExists = true
+            };
+
+            if (dialog.ShowDialog() == true)
+            {
+                txtFilePath.Text = dialog.FileName;
+                txtFilePath.Foreground = Brushes.Black;
+                btnExecute.IsEnabled = true;
+                AppendLog($"[✓] Selected file: {dialog.FileName}");
+            }
+        }
+
+        /// <summary>
+        /// Add a new empty parameter row to the list.
+        /// </summary>
+        private void btnAddParam_Click(object sender, RoutedEventArgs e)
+        {
+            var newParam = new ParameterItem
+            {
+                ParamName = "",
+                ParamValue = "",
+                RemoveCommand = new RelayCommand<ParameterItem>(RemoveParameter)
+            };
+            _parameters.Add(newParam);
+        }
+
+        /// <summary>
+        /// Remove a parameter from the list.
+        /// </summary>
+        private void RemoveParameter(ParameterItem item)
+        {
+            if (_parameters.Contains(item))
+                _parameters.Remove(item);
+        }
+
+        /// <summary>
+        /// Clear the execution log.
+        /// </summary>
+        private void btnClearLog_Click(object sender, RoutedEventArgs e)
+        {
+            txtLog.Clear();
+        }
+
+        /// <summary>
+        /// Main execution button — runs the full Creo automation workflow.
+        /// </summary>
+        private async void btnExecute_Click(object sender, RoutedEventArgs e)
+        {
+            // Validate file selection
+            string filePath = txtFilePath.Text.Trim();
+            if (string.IsNullOrEmpty(filePath) || !File.Exists(filePath))
+            {
+                MessageBox.Show("Please select a valid Creo part (.prt) or assembly (.asm) file.",
+                                "File Required", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            // Disable UI during execution
+            SetUIEnabled(false);
+            progressBar.Value = 0;
+            txtLog.Clear();
+            AppendLog("═══════════════════════════════════════════════════");
+            AppendLog("🚀 Starting Creo Parametric Automation...");
+            AppendLog($"📁 File: {filePath}");
+            AppendLog("═══════════════════════════════════════════════════\n");
+
+            try
+            {
+                // Run the automation workflow on a background thread
+                await System.Threading.Tasks.Task.Run(() =>
+                {
+                    ExecuteCreoAutomation(filePath);
+                });
+            }
+            catch (Exception ex)
+            {
+                AppendLog($"\n[❌] FATAL ERROR: {ex.Message}");
+                AppendLog($"[❌] Stack Trace:\n{ex.StackTrace}");
+            }
+            finally
+            {
+                // Clean up Creo connection if active
+                CleanupCreoConnection();
+
+                // Re-enable UI
+                Dispatcher.Invoke(() =>
+                {
+                    SetUIEnabled(true);
+                    progressBar.Value = progressBar.Maximum;
+                    AppendLog("\n═══════════════════════════════════════════════════");
+                    AppendLog(progressBar.Value >= 100 ? "✅ Automation completed successfully!" : "⚠️ Automation completed with issues.");
+                    AppendLog("═══════════════════════════════════════════════════");
+                });
+            }
+        }
+
+        // ==================== CORE AUTOMATION LOGIC ====================
+
+        /// <summary>
+        /// Main Creo automation workflow.
+        /// Steps: Connect → Open Model → Get/Create Drawing → Add Views →
+        ///        Add Mass Table → Update Params → Export PDF
+        /// </summary>
+        private void ExecuteCreoAutomation(string filePath)
+        {
+            // --------------------------------------------------
+            // PHASE 1: Connect to running Creo session
+            // --------------------------------------------------
+            AppendLog("[1/7] 🔌 Connecting to Creo Parametric session...");
+            UpdateProgress(5);
+
+            dynamic connection = ConnectToCreo();
+            if (connection == null) return;
+            _asyncConnection = connection;
+
+            dynamic session = connection.Session;
+            AppendLog("[✓] Connected to Creo session successfully.");
+            UpdateProgress(10);
+
+            try
+            {
+                // --------------------------------------------------
+                // PHASE 2: Open the part/assembly model
+                // --------------------------------------------------
+                AppendLog("\n[2/7] 📂 Opening model file...");
+                UpdateProgress(12);
+
+                dynamic model = OpenModel(session, filePath);
+                if (model == null) return;
+
+                _solidModel = model;
+                string modelName = Path.GetFileNameWithoutExtension(filePath);
+                AppendLog($"[✓] Model opened: {modelName}");
+                UpdateProgress(20);
+
+                // --------------------------------------------------
+                // PHASE 3: Create or open associated drawing
+                // --------------------------------------------------
+                AppendLog("\n[3/7] 📄 Opening/Creating drawing...");
+                UpdateProgress(22);
+
+                dynamic drawing = OpenOrCreateDrawing(session, model, modelName);
+                if (drawing == null) return;
+
+                _drawing = drawing;
+                _session = session;
+                AppendLog($"[✓] Drawing activated: {drawing.InstanceName}");
+                UpdateProgress(30);
+
+                // --------------------------------------------------
+                // PHASE 4: Display the model in the drawing
+                // --------------------------------------------------
+                AppendLog("\n[4/7] 📐 Adding model to drawing...");
+                UpdateProgress(32);
+
+                drawing.AddModel(model);
+                AppendLog("[✓] Model added to drawing.");
+                UpdateProgress(35);
+
+                // --------------------------------------------------
+                // PHASE 5: Create 4 standard views
+                // --------------------------------------------------
+                AppendLog("\n[5/7] 🖼️ Creating 4 drawing views...");
+                UpdateProgress(38);
+
+                CreateFourViews(drawing, model);
+                AppendLog("[✓] All 4 views created successfully.");
+                UpdateProgress(50);
+
+                // --------------------------------------------------
+                // PHASE 6: Add mass properties table
+                // --------------------------------------------------
+                AppendLog("\n[6/7] 📊 Creating mass properties table...");
+                UpdateProgress(55);
+
+                CreateMassPropertiesTable(drawing, model);
+                AppendLog("[✓] Mass properties table added.");
+                UpdateProgress(65);
+
+                // --------------------------------------------------
+                // PHASE 7: Find & Update parameters
+                // --------------------------------------------------
+                AppendLog("\n[6b/7] 🔍 Finding & updating parameters...");
+                UpdateProgress(70);
+
+                UpdateModelParameters(model);
+                UpdateProgress(80);
+
+                // --------------------------------------------------
+                // PHASE 8: Regenerate & Export to PDF
+                // --------------------------------------------------
+                AppendLog("\n[7/7] 📤 Exporting drawing to PDF...");
+                UpdateProgress(82);
+
+                ExportDrawingToPDF(drawing, modelName);
+                UpdateProgress(95);
+
+                AppendLog("\n✅ ALL STEPS COMPLETED SUCCESSFULLY!");
+            }
+            catch (Exception ex)
+            {
+                AppendLog($"\n[❌] Error during automation: {ex.Message}");
+                throw;
+            }
+        }
+
+        // ==================== CREO API HELPER METHODS ====================
+
+        /// <summary>
+        /// Connect to a running Creo Parametric session.
+        /// NOTE: The actual Creo API call is commented out.
+        /// Uncomment when pfcls COM reference is added.
+        /// 
+        /// Actual API:
+        ///   CCpfcAsyncConnection connClass = new CCpfcAsyncConnection();
+        ///   IpfcAsyncConnection conn = connClass.Connect(null, null, null, null);
+        /// </summary>
+        private dynamic ConnectToCreo()
+        {
+            // ----------------------------------------------------------
+            // UNCOMMENT THIS BLOCK AFTER ADDING THE Creo COM REFERENCE:
+            // ----------------------------------------------------------
+            // try
+            // {
+            //     CCpfcAsyncConnection connClass = new CCpfcAsyncConnection();
+            //     IpfcAsyncConnection conn = connClass.Connect(null, null, null, null);
+            //     return conn;
+            // }
+            // catch (IpfcXToolkitAmbiguous)
+            // {
+            //     AppendLog("[!] Multiple Creo sessions found. Retrying with first available...");
+            //     // Try connecting by listing sessions
+            //     IpfcAsyncConnection[] sessions = connClass.List(null, null);
+            //     if (sessions != null && sessions.Length > 0)
+            //         return connClass.ConnectById(sessions[0].ConnectionId, null, null, null);
+            // }
+            // catch (Exception ex)
+            // {
+            //     AppendLog($"[❌] Failed to connect to Creo: {ex.Message}");
+            //     AppendLog("[!] Make sure Creo Parametric is running and VB API is enabled.");
+            //     return null;
+            // }
+
+            // ---- TEMPLATE CODE (delete when uncommented above) ----
+            AppendLog("[⚠️] Creo COM reference not yet added.");
+            AppendLog("[i] The 'pfcls' namespace is not available in this build.");
+            AppendLog("[i] Add COM reference: PTC Creo Parametric VB API Type Library.");
+            AppendLog("[i] Then uncomment the API calls in the source code.\n");
+
+            // For testing the UI flow, simulate a connection:
+            AppendLog("[i] --- SIMULATION MODE ---");
+            AppendLog("[i] To use real Creo API:");
+            AppendLog("[i]   1. Right-click References > Add Reference > COM tab");
+            AppendLog("[i]   2. Select 'PTC Creo Parametric VB API Type Library'");
+            AppendLog("[i]   3. Uncomment 'using pfcls;' at top of this file");
+            AppendLog("[i]   4. Uncomment the actual API calls below\n");
+
+            // Return a mock so the rest of the code can be demonstrated
+            return new MockCreoConnection();
+            // -----------------------------------------------------
+        }
+
+        /// <summary>
+        /// Open a part or assembly file in Creo.
+        /// 
+        /// Actual API:
+        ///   IpfcModel model = session.OpenFile(filePath);
+        ///   // Or use RetrieveModel + Display
+        /// </summary>
+        private dynamic OpenModel(dynamic session, string filePath)
+        {
+            // ----------------------------------------------------------
+            // UNCOMMENT THIS BLOCK AFTER ADDING THE Creo COM REFERENCE:
+            // ----------------------------------------------------------
+            // try
+            // {
+            //     // Retrieve the model
+            //     IpfcModelDescriptor desc = CCpfcModelDescriptor.Create();
+            //     desc.Type = EpfcModelType.EpfcMDL_PART;
+            //     if (filePath.EndsWith(".asm", StringComparison.OrdinalIgnoreCase))
+            //         desc.Type = EpfcModelType.EpfcMDL_ASSEMBLY;
+            //     
+            //     desc.Name = Path.GetFileNameWithoutExtension(filePath);
+            //     
+            //     IpfcModel model = session.GetModelWithDescriptor(desc);
+            //     if (model == null)
+            //     {
+            //         // Model not yet loaded — open it
+            //         model = session.OpenFile(filePath);
+            //     }
+            //     
+            //     // Activate/display the model
+            //     model.Display();
+            //     return model;
+            // }
+            // catch (Exception ex)
+            // {
+            //     AppendLog($"[❌] Could not open model: {ex.Message}");
+            //     return null;
+            // }
+
+            // ---- SIMULATION ----
+            AppendLog($"[i] (Simulated) Opening: {Path.GetFileName(filePath)}");
+            AppendLog("[i] Actual code would call session.OpenFile()");
+            return new MockModel { InstanceName = Path.GetFileNameWithoutExtension(filePath) };
+            // --------------------
+        }
+
+        /// <summary>
+        /// Open an existing drawing or create a new one for the given model.
+        /// 
+        /// Actual API:
+        ///   session.GetModel(drwName, EpfcModelType.EpfcMDL_DRAWING)
+        ///   or session.NewModel(...)
+        /// </summary>
+        private dynamic OpenOrCreateDrawing(dynamic session, dynamic model, string modelName)
+        {
+            // ----------------------------------------------------------
+            // UNCOMMENT THIS BLOCK AFTER ADDING THE Creo COM REFERENCE:
+            // ----------------------------------------------------------
+            // try
+            // {
+            //     string drwName = modelName + ".drw";
+            //     IpfcDrawing drawing = session.GetModel(drwName, 
+            //         (int)EpfcModelType.EpfcMDL_DRAWING) as IpfcDrawing;
+            //     
+            //     if (drawing == null)
+            //     {
+            //         AppendLog("[i] Drawing not found. Creating a new drawing...");
+            //         // Create new drawing from default template
+            //         string templatePath = @"C:\Program Files\PTC\Creo 10.0.0.0\Common Files\templates\c_drawing.drw";
+            //         if (!File.Exists(templatePath))
+            //         {
+            //             // Try alternative template paths
+            //             templatePath = FindDrawingTemplate();
+            //         }
+            //         
+            //         drawing = session.NewModel(drwName, 
+            //             (int)EpfcModelType.EpfcMDL_DRAWING, templatePath) as IpfcDrawing;
+            //     }
+            //     
+            //     drawing.Display();
+            //     session.CurrentModel = drawing;
+            //     return drawing;
+            // }
+            // catch (Exception ex)
+            // {
+            //     AppendLog($"[❌] Could not open/create drawing: {ex.Message}");
+            //     return null;
+            // }
+
+            // ---- SIMULATION ----
+            AppendLog($"[i] (Simulated) Opening/Creating drawing for: {modelName}");
+            return new MockModel { InstanceName = modelName + ".drw" };
+            // --------------------
+        }
+
+        /// <summary>
+        /// Create 4 standard views on the drawing:
+        ///   - Front (General View)
+        ///   - Top (Projection from Front)
+        ///   - Right (Projection from Front)
+        ///   - Isometric (General View)
+        /// 
+        /// Actual API uses IpfcModel2D.CreateView() with
+        /// IpfcGeneralViewCreateInstructions and
+        /// IpfcProjectionViewCreateInstructions.
+        /// </summary>
+        private void CreateFourViews(dynamic drawing, dynamic model)
+        {
+            // ----------------------------------------------------------
+            // UNCOMMENT THIS BLOCK AFTER ADDING THE Creo COM REFERENCE:
+            // ----------------------------------------------------------
+            // try
+            // {
+            //     // Cast drawing to IpfcModel2D to access CreateView
+            //     IpfcModel2D model2D = drawing as IpfcModel2D;
+            //     if (model2D == null)
+            //     {
+            //         AppendLog("[!] Drawing is not a valid IpfcModel2D.");
+            //         return;
+            //     }
+            //     
+            //     // --- VIEW 1: Front View (General View) ---
+            //     IpfcPoint2D frontPoint = (new CCpfcPoint2D()).Create(15.0, 10.0);
+            //     IpfcGeneralViewCreateInstructions genInst = 
+            //         (new CCpfcGeneralViewCreateInstructions()).Create(frontPoint);
+            //     
+            //     // Set view orientation to front (using default view state)
+            //     genInst.ViewName = "FRONT";
+            //     genInst.ModelToAdd = model;
+            //     genInst.Type = EpfcViewType.EpfcGENERAL_VIEW;
+            //     
+            //     // Try to set the view state
+            //     try {
+            //         IpfcViewState viewState = model.GetViewStateByName("FRONT");
+            //         if (viewState != null)
+            //             genInst.ViewState = viewState;
+            //     } catch { /* Use default orientation */ }
+            //     
+            //     IpfcView2D frontView = model2D.CreateView(genInst);
+            //     frontView.SetScale(0.5);
+            //     AppendLog("  ✓ Created Front view at (15.0, 10.0)");
+            //     
+            //     // --- VIEW 2: Top View (Projection from Front) ---
+            //     IpfcVector2D topDir = (new CCpfcVector2D()).Create(0.0, 1.0);
+            //     IpfcProjectionViewCreateInstructions topInst = 
+            //         (new CCpfcProjectionViewCreateInstructions()).Create(frontView, topDir);
+            //     
+            //     IpfcView2D topView = model2D.CreateView(topInst);
+            //     AppendLog("  ✓ Created Top view (projection upward)");
+            //     
+            //     // --- VIEW 3: Right View (Projection from Front) ---
+            //     IpfcVector2D rightDir = (new CCpfcVector2D()).Create(1.0, 0.0);
+            //     IpfcProjectionViewCreateInstructions rightInst = 
+            //         (new CCpfcProjectionViewCreateInstructions()).Create(frontView, rightDir);
+            //     
+            //     IpfcView2D rightView = model2D.CreateView(rightInst);
+            //     AppendLog("  ✓ Created Right view (projection to right)");
+            //     
+            //     // --- VIEW 4: Isometric View (General View) ---
+            //     IpfcPoint2D isoPoint = (new CCpfcPoint2D()).Create(40.0, 5.0);
+            //     IpfcGeneralViewCreateInstructions isoInst = 
+            //         (new CCpfcGeneralViewCreateInstructions()).Create(isoPoint);
+            //     
+            //     isoInst.ModelToAdd = model;
+            //     // Try isometric orientation
+            //     try {
+            //         IpfcViewState isoState = model.GetViewStateByName("ISO");
+            //         if (isoState != null)
+            //             isoInst.ViewState = isoState;
+            //     } catch { /* Use default */ }
+            //     
+            //     IpfcView2D isoView = model2D.CreateView(isoInst);
+            //     isoView.SetScale(0.5);
+            //     AppendLog("  ✓ Created Isometric view at (40.0, 5.0)");
+            // }
+            // catch (Exception ex)
+            // {
+            //     AppendLog($"[⚠️] View creation issue: {ex.Message}");
+            //     AppendLog("[i] Continuing with fewer views may still work.");
+            // }
+
+            // ---- SIMULATION ----
+            AppendLog("  [i] (Simulated) Creating 4 views:");
+            AppendLog("    1. Front view   — General view at (15, 10)");
+            AppendLog("    2. Top view     — Projection from Front");
+            AppendLog("    3. Right view   — Projection from Front");
+            AppendLog("    4. Isometric    — General view at (40, 5)");
+            AppendLog("[i] Uses IpfcModel2D.CreateView() with GeneralViewCreateInstructions");
+            AppendLog("[i] and ProjectionViewCreateInstructions.");
+            // --------------------
+        }
+
+        /// <summary>
+        /// Create a table on the drawing and populate with mass property data.
+        /// 
+        /// Actual API: IpfcTableOwner.CreateTable() + IpfcTable.SetText()
+        /// Mass data from: IpfcSolid.GetMassProperty()
+        /// </summary>
+        private void CreateMassPropertiesTable(dynamic drawing, dynamic model)
+        {
+            // ----------------------------------------------------------
+            // UNCOMMENT THIS BLOCK AFTER ADDING THE Creo COM REFERENCE:
+            // ----------------------------------------------------------
+            // try
+            // {
+            //     IpfcTableOwner tableOwner = drawing as IpfcTableOwner;
+            //     if (tableOwner == null)
+            //     {
+            //         AppendLog("[!] Drawing does not support table creation.");
+            //         return;
+            //     }
+            //     
+            //     // Get mass properties from solid model
+            //     IpfcSolid solid = model as IpfcSolid;
+            //     if (solid == null)
+            //     {
+            //         AppendLog("[!] Model is not a solid. Cannot compute mass properties.");
+            //         return;
+            //     }
+            //     
+            //     IpfcMassProperty massProps = solid.GetMassProperty(null);
+            //     
+            //     // Prepare data rows
+            //     var massData = new Dictionary<string, string>
+            //     {
+            //         ["PROPERTY"] = "VALUE",
+            //         ["--------"] = "--------",
+            //         ["Mass"] = $"{massProps.Mass:F6}",
+            //         ["Volume"] = $"{massProps.Volume:F6}",
+            //         ["Density"] = $"{massProps.Density:F6}",
+            //         ["Surface Area"] = $"{massProps.SurfaceArea:F6}",
+            //         ["CG (X)"] = $"{massProps.CenterOfGravity.X:F4}",
+            //         ["CG (Y)"] = $"{massProps.CenterOfGravity.Y:F4}",
+            //         ["CG (Z)"] = $"{massProps.CenterOfGravity.Z:F4}"
+            //     };
+            //     
+            //     // Create table instructions
+            //     IpfcPoint3D tableOrigin = (new CCpfcPoint3D()).Create(12.0, 5.0, 0.0);
+            //     IpfcTableCreateInstructions tableInst = 
+            //         CCpfcTableCreateInstructions.Create(tableOrigin);
+            //     
+            //     // Configure table dimensions (9 rows x 2 columns)
+            //     double[] rowHeights = new double[massData.Count];
+            //     Array.Fill(rowHeights, 0.4);
+            //     tableInst.RowHeights = rowHeights;
+            //     
+            //     // Column configuration
+            //     IpfcTableColumn[] columns = new IpfcTableColumn[2];
+            //     columns[0] = new CCpfcTableColumn().Create(2.0, EpfcTableJustification.EpfcTABLE_JUST_LEFT);
+            //     columns[1] = new CCpfcTableColumn().Create(2.0, EpfcTableJustification.EpfcTABLE_JUST_CENTER);
+            //     tableInst.ColumnData = columns;
+            //     
+            //     // Create the table
+            //     IpfcTable table = tableOwner.CreateTable(tableInst);
+            //     
+            //     // Fill table cells
+            //     int row = 0;
+            //     foreach (var kvp in massData)
+            //     {
+            //         IpfcTableCell cell = (new CCpfcTableCell()).Create(row, 0);
+            //         table.SetText(cell, new string[] { kvp.Key });
+            //         
+            //         IpfcTableCell cellVal = (new CCpfcTableCell()).Create(row, 1);
+            //         table.SetText(cellVal, new string[] { kvp.Value });
+            //         row++;
+            //     }
+            //     
+            //     AppendLog("  ✓ Table created with mass property data");
+            // }
+            // catch (Exception ex)
+            // {
+            //     AppendLog($"[⚠️] Could not create mass properties table: {ex.Message}");
+            // }
+
+            // ---- SIMULATION ----
+            AppendLog("  [i] (Simulated) Mass Properties Table:");
+            AppendLog("  ┌──────────────────────┬──────────────┐");
+            AppendLog("  │ PROPERTY             │ VALUE        │");
+            AppendLog("  ├──────────────────────┼──────────────┤");
+            AppendLog("  │ Mass                 │  1.234560    │");
+            AppendLog("  │ Volume               │  0.000567    │");
+            AppendLog("  │ Density              │  2.710000    │");
+            AppendLog("  │ Surface Area         │  45.678900   │");
+            AppendLog("  │ CG (X)               │  12.3456     │");
+            AppendLog("  │ CG (Y)               │  5.4321      │");
+            AppendLog("  │ CG (Z)               │  0.0000      │");
+            AppendLog("  └──────────────────────┴──────────────┘");
+            // --------------------
+        }
+
+        /// <summary>
+        /// Find and update user-specified parameters in the model.
+        /// 
+        /// Actual API: IpfcModelItem.GetParam() + IpfcParam.SetValue()
+        /// </summary>
+        private void UpdateModelParameters(dynamic model)
+        {
+            // Collect parameters from the UI (thread-safe)
+            List<ParameterItem> paramsToUpdate = null;
+            Dispatcher.Invoke(() =>
+            {
+                paramsToUpdate = _parameters
+                    .Where(p => !string.IsNullOrWhiteSpace(p.ParamName))
+                    .ToList();
+            });
+
+            if (paramsToUpdate == null || paramsToUpdate.Count == 0)
+            {
+                AppendLog("  [i] No parameters specified to update.");
+                return;
+            }
+
+            int updated = 0, notFound = 0;
+
+            foreach (var param in paramsToUpdate)
+            {
+                try
+                {
+                    // --------------------------------------------------
+                    // UNCOMMENT THIS BLOCK AFTER ADDING THE Creo COM REFERENCE:
+                    // --------------------------------------------------
+                    // IpfcParam existingParam = model.GetParam(param.ParamName);
+                    // if (existingParam != null)
+                    // {
+                    //     IpfcParameterValue newValue = existingParam.Value;
+                    //     
+                    //     // Set value based on parameter type
+                    //     switch (existingParam.Type)
+                    //     {
+                    //         case EpfcParamType.EpfcParamString:
+                    //             newValue.StringValue = param.ParamValue;
+                    //             break;
+                    //         case EpfcParamType.EpfcParamDouble:
+                    //             if (double.TryParse(param.ParamValue, out double dVal))
+                    //                 newValue.DoubleValue = dVal;
+                    //             break;
+                    //         case EpfcParamType.EpfcParamInteger:
+                    //             if (int.TryParse(param.ParamValue, out int iVal))
+                    //                 newValue.IntValue = iVal;
+                    //             break;
+                    //         default:
+                    //             newValue.StringValue = param.ParamValue;
+                    //             break;
+                    //     }
+                    //     
+                    //     existingParam.SetValue(newValue);
+                    //     AppendLog($"  ✓ Parameter '{param.ParamName}' = '{param.ParamValue}'");
+                    //     updated++;
+                    // }
+                    // else
+                    // {
+                    //     AppendLog($"  ⚠️ Parameter '{param.ParamName}' not found");
+                    //     notFound++;
+                    // }
+
+                    // ---- SIMULATION ----
+                    AppendLog($"  [i] (Simulated) Set '{param.ParamName}' = '{param.ParamValue}'");
+                    updated++;
+                    // --------------------
+                }
+                catch (Exception ex)
+                {
+                    AppendLog($"  [⚠️] Error updating '{param.ParamName}': {ex.Message}");
+                    notFound++;
+                }
+            }
+
+            AppendLog($"  [i] Parameters updated: {updated}, not found: {notFound}");
+        }
+
+        /// <summary>
+        /// Export the drawing to PDF and save to Desktop/CreoExport folder.
+        /// 
+        /// Actual API: IpfcModel.Export() with IpfcPDFExportInstructions
+        /// </summary>
+        private void ExportDrawingToPDF(dynamic drawing, string modelName)
+        {
+            // Determine output path: Desktop/CreoExport folder
+            string desktopPath = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
+            string exportDir = Path.Combine(desktopPath, "CreoExport");
+            Directory.CreateDirectory(exportDir); // Ensure it exists
+
+            string pdfFileName = $"{modelName}_{DateTime.Now:yyyyMMdd_HHmmss}.pdf";
+            string pdfFilePath = Path.Combine(exportDir, pdfFileName);
+
+            // ----------------------------------------------------------
+            // UNCOMMENT THIS BLOCK AFTER ADDING THE Creo COM REFERENCE:
+            // ----------------------------------------------------------
+            // try
+            // {
+            //     // Create PDF export instructions
+            //     IpfcPDFExportInstructions pdfInst = CCpfcPDFExportInstructions.Create();
+            //     
+            //     // Optional: Configure PDF settings
+            //     pdfInst.DPI = 300;
+            //     pdfInst.PDFColorSpace = EpfcPDFColorSpace.EpfcPDF_COLOR_RGB;
+            //     pdfInst.EmbedFonts = true;
+            //     pdfInst.LayerInfo = EpfcPDFLayerInfo.EpfcPDF_LAYER_NO;
+            //     pdfInst.TextAsGeometry = false;
+            //     
+            //     // Export the drawing
+            //     drawing.Export(pdfFilePath, pdfInst);
+            //     AppendLog($"  ✓ PDF exported successfully!");
+            // }
+            // catch (Exception ex)
+            // {
+            //     AppendLog($"[❌] PDF export failed: {ex.Message}");
+            //     throw; // This is a critical step
+            // }
+
+            // ---- SIMULATION ----
+            AppendLog($"  [i] (Simulated) Exporting to PDF:");
+            AppendLog($"    📄 File: {pdfFileName}");
+            AppendLog($"    📁 Folder: {exportDir}");
+            AppendLog($"  [i] Actual API: model.Export(path, CCpfcPDFExportInstructions.Create())");
+            // --------------------
+        }
+
+        // ==================== CLEANUP METHODS ====================
+
+        /// <summary>
+        /// Clean up the Creo connection gracefully.
+        /// Real API: _asyncConnection.Disconnect() or _asyncConnection.End()
+        /// </summary>
+        private void CleanupCreoConnection()
+        {
+            if (_asyncConnection != null)
+            {
+                try
+                {
+                    // ---- UNCOMMENT WHEN USING REAL Creo API: ----
+                    // _asyncConnection.Disconnect();
+                    AppendLog("[i] Creo connection cleaned up.");
+                }
+                catch
+                {
+                    // Silently handle cleanup errors
+                }
+                finally
+                {
+                    _asyncConnection = null;
+                    _session = null;
+                    _drawing = null;
+                    _solidModel = null;
+                }
+            }
+        }
+
+        // ==================== UTILITY METHODS ====================
+
+        /// <summary>
+        /// Append a timestamped message to the log text box (thread-safe).
+        /// </summary>
+        private void AppendLog(string message)
+        {
+            Dispatcher.Invoke(() =>
+            {
+                string timestamp = DateTime.Now.ToString("HH:mm:ss");
+                txtLog.AppendText($"[{timestamp}] {message}\n");
+                txtLog.ScrollToEnd();
+            });
+        }
+
+        /// <summary>
+        /// Update the progress bar value (thread-safe).
+        /// </summary>
+        private void UpdateProgress(int value)
+        {
+            Dispatcher.Invoke(() =>
+            {
+                progressBar.Value = Math.Min(value, 100);
+            });
+        }
+
+        /// <summary>
+        /// Enable or disable the main UI controls.
+        /// </summary>
+        private void SetUIEnabled(bool enabled)
+        {
+            btnBrowse.IsEnabled = enabled;
+            btnExecute.IsEnabled = enabled;
+            btnAddParam.IsEnabled = enabled;
+            btnClearLog.IsEnabled = enabled;
+        }
+
+        // ==================== MOCK CLASSES FOR TEMPLATE ====================
+
+        /// <summary>
+        /// Mock connection object — used only until pfcls COM reference is added.
+        /// Replace with actual IpfcAsyncConnection from Creo API.
+        /// </summary>
+        private class MockCreoConnection
+        {
+            public dynamic Session => new MockSession();
+        }
+
+        /// <summary>
+        /// Mock session object — used only until pfcls COM reference is added.
+        /// </summary>
+        private class MockSession
+        {
+            public string InstanceName => "CreoSession";
+            public dynamic CurrentModel { get; set; }
+        }
+
+        /// <summary>
+        /// Mock model object — used only until pfcls COM reference is added.
+        /// </summary>
+        private class MockModel
+        {
+            public string InstanceName { get; set; }
+            public void Display() { }
+            public void AddModel(dynamic model) { }
+            public void Export(string path, dynamic instructions) { }
+            public dynamic GetParam(string name) => null;
+            public dynamic CreateView(dynamic instructions) => new MockView();
+        }
+
+        /// <summary>
+        /// Mock view object — used only until pfcls COM reference is added.
+        /// </summary>
+        private class MockView
+        {
+            public void SetScale(double scale) { }
+        }
+    }
+
+    // ==================== RELAY COMMAND ====================
+
+    /// <summary>
+    /// Simple ICommand implementation for binding button commands.
+    /// </summary>
+    public class RelayCommand<T> : ICommand
+    {
+        private readonly Action<T> _execute;
+        private readonly Predicate<T> _canExecute;
+
+        public RelayCommand(Action<T> execute, Predicate<T> canExecute = null)
+        {
+            _execute = execute ?? throw new ArgumentNullException(nameof(execute));
+            _canExecute = canExecute;
+        }
+
+        public bool CanExecute(object parameter) =>
+            _canExecute?.Invoke((T)parameter) ?? true;
+
+        public void Execute(object parameter) =>
+            _execute((T)parameter);
+
+        public event EventHandler CanExecuteChanged
+        {
+            add => CommandManager.RequerySuggested += value;
+            remove => CommandManager.RequerySuggested -= value;
+        }
+    }
+}
