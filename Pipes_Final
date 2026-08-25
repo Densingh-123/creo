@@ -3,7 +3,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Threading;
-
+using static System.Security.Cryptography.ECCurve;
 namespace ConsoleApp2
 {
     public class Program
@@ -11,12 +11,10 @@ namespace ConsoleApp2
         public static CCpfcAsyncConnection Asc { get; set; }
         public static IpfcAsyncConnection Iac { get; set; }
         public static IpfcBaseSession Session { get; set; }
-
         private const double PLANE_TOLERANCE = 0.5;
         private const double DIFFERENT_END_TOLERANCE = 50.0;
         private const double DISTANCE_TOLERANCE = 0.000001;
         private const double DIRECTION_TOLERANCE = 0.000001;
-
         public class CylinderInfo
         {
             public IpfcSurface Surface { get; set; }
@@ -24,118 +22,57 @@ namespace ConsoleApp2
             public double Area { get; set; }
             public int Index { get; set; }
         }
-
         public class TerminalSide
         {
             public IpfcSurface Plane { get; set; }
             public IpfcEdge Edge { get; set; }
             public IpfcSurface Cylinder { get; set; }
-
             public double[] PlaneOrigin { get; set; }
             public double[] EdgeCenter { get; set; }
-
             public int PlaneIndex { get; set; }
             public int CylinderIndex { get; set; }
-
             public double CylinderArea { get; set; }
             public double PipeDistance { get; set; }
         }
-
         public static void Main()
         {
             Connect();
-
             if (Session is null)
             {
-                Console.WriteLine(
-                    "ERROR: Could not connect to Creo session.");
-
+                Console.WriteLine("ERROR: Could not connect to Creo session.");
                 return;
             }
 
             IpfcModel model = Session.CurrentModel;
-
             if (model is null)
             {
-                Console.WriteLine(
-                    "ERROR: No active model.");
-
+                Console.WriteLine("ERROR: No active model.");
                 return;
             }
-
-            Console.WriteLine(
-                "Active model: " +
-                model.InstanceName);
-
+            Console.WriteLine("Active model: " +model.InstanceName);
             CreatePipeTree();
         }
-
-        // ====================================================================
-        // CREATE PIPE TREE
-        // ====================================================================
-
         public static void CreatePipeTree()
         {
             try
             {
-                IpfcModel model =
-                    Session.CurrentModel;
-
-                IpfcSolid solid =
-                    (IpfcSolid)model;
-
-                IpfcModelItemOwner itemOwner =
-                    (IpfcModelItemOwner)model;
-
-                // ============================================================
-                // INITIAL AXIS COUNT
-                // ============================================================
-
-                IpfcModelItems initialAxes =
-                    itemOwner.ListItems(
-                        EpfcModelItemType.EpfcITEM_AXIS);
-
-                int initialAxisCount =
-                    initialAxes?.Count ?? 0;
-
-                // ============================================================
-                // INITIAL POINT COUNT
-                // ============================================================
-
-                IpfcModelItems initialPoints =
-                    itemOwner.ListItems(
-                        EpfcModelItemType.EpfcITEM_POINT);
-
-                int initialPointCount =
-                    initialPoints?.Count ?? 0;
-
-                // ============================================================
-                // FIND TERMINAL SIDES
-                // ============================================================
-
-                List<TerminalSide> terminalSides =
-                    FindTerminalSides(itemOwner);
-
+                IpfcModel model =Session.CurrentModel;
+                IpfcSolid solid =(IpfcSolid)model;
+                IpfcModelItemOwner itemOwner =(IpfcModelItemOwner)model;
+                IpfcModelItems initialAxes =itemOwner.ListItems(EpfcModelItemType.EpfcITEM_AXIS);
+                int initialAxisCount =initialAxes?.Count ?? 0;
+                IpfcModelItems initialPoints =itemOwner.ListItems(EpfcModelItemType.EpfcITEM_POINT);
+                int initialPointCount =initialPoints?.Count ?? 0;
+                List<TerminalSide> terminalSides =FindTerminalSides(itemOwner);
                 if (terminalSides.Count < 2)
                 {
-                    Console.WriteLine(
-                        "ERROR: Could not find two terminal planes " +
-                        "with circular edges.");
-
+                    Console.WriteLine("ERROR: Could not find two terminal planes " +"with circular edges.");
                     return;
                 }
-
-                // ============================================================
-                // FIND CYLINDERS
-                // ============================================================
-
-                List<CylinderInfo> cylinders =
-                    FindDistinctCylinders(itemOwner);
-
+                List<CylinderInfo> cylinders = FindDistinctCylinders(itemOwner);
                 if (cylinders.Count < 2)
                 {
-                    Console.WriteLine(
-                        "ERROR: Could not find two distinct cylindrical " +
+                    Console.WriteLine("ERROR: Could not find two distinct cylindrical " +
                         "surfaces.");
 
                     return;
@@ -154,10 +91,6 @@ namespace ConsoleApp2
                     return;
                 }
 
-                // ============================================================
-                // DETERMINE START / END  (start = shortest / smaller pipe)
-                // ============================================================
-
                 TerminalSide startingSide;
                 TerminalSide endingSide;
 
@@ -172,10 +105,6 @@ namespace ConsoleApp2
                     startingSide = terminalSides[1];
                     endingSide = terminalSides[0];
                 }
-
-                // ============================================================
-                // CREATE START POINT
-                // ============================================================
 
                 IpfcModelItem startPoint =
                     CreateDatumPointAtEdgeCenter(
@@ -192,22 +121,13 @@ namespace ConsoleApp2
 
                 SetModelItemName(
                     startPoint,
-                    "START_POINT");
+                    "PIPE_START_POINT");
 
                 Console.WriteLine(
                     "\nSTART_POINT created: " +
                     startPoint.GetName());
-
-                // ============================================================
-                // CREATE AXIS 1
-                // ============================================================
-
                 CreateAxisFromCylinder(
                     startingSide.Cylinder);
-
-                // ============================================================
-                // CREATE AXIS 2
-                // ============================================================
 
                 CreateAxisFromCylinder(
                     endingSide.Cylinder);
@@ -241,11 +161,6 @@ namespace ConsoleApp2
                 Console.WriteLine(
                     "AXIS2 created: " +
                     axis2.GetName());
-
-                // ============================================================
-                // CREATE MID POINT
-                // ============================================================
-
                 IpfcSession sessionContext =
                     (IpfcSession)Session;
 
@@ -301,16 +216,11 @@ namespace ConsoleApp2
 
                 SetModelItemName(
                     midpoint,
-                    "MID_POINT");
+                    "PIPE_Z_POINT");
 
                 Console.WriteLine(
                     "MID_POINT created: " +
                     midpoint.GetName());
-
-                // ============================================================
-                // CREATE END POINT
-                // ============================================================
-
                 IpfcModelItem endPoint =
                     CreateDatumPointAtEdgeCenter(
                         itemOwner,
@@ -326,16 +236,11 @@ namespace ConsoleApp2
 
                 SetModelItemName(
                     endPoint,
-                    "END_POINT");
+                    "PIPE_END_POINT");
 
                 Console.WriteLine(
                     "END_POINT created: " +
                     endPoint.GetName());
-
-                // ============================================================
-                // DISTANCES
-                // ============================================================
-
                 startingSide.PipeDistance =
                     GetSelectionDistance(
                         midpoint,
@@ -346,11 +251,23 @@ namespace ConsoleApp2
                         midpoint,
                         endPoint);
 
+                bool isStartingShorter =
+                    startingSide.PipeDistance <= endingSide.PipeDistance;
+
                 double minimumPipeDistance =
-                    startingSide.PipeDistance;
+                    isStartingShorter
+                        ? startingSide.PipeDistance
+                        : endingSide.PipeDistance;
 
                 double maximumPipeDistance =
-                    endingSide.PipeDistance;
+                    isStartingShorter
+                        ? endingSide.PipeDistance
+                        : startingSide.PipeDistance;
+
+                string shorterNode = isStartingShorter ? "node10" : "node14";
+                string longerNode = isStartingShorter ? "node14" : "node10";
+                IpfcModelItem shorterPoint = isStartingShorter ? startPoint : endPoint;
+                IpfcModelItem longerPoint = isStartingShorter ? endPoint : startPoint;
 
                 solid.Regenerate(null);
 
@@ -369,7 +286,7 @@ namespace ConsoleApp2
 
                 Console.WriteLine(
                     "  Starting pipe distance: " +
-                    minimumPipeDistance.ToString("F4"));
+                    startingSide.PipeDistance.ToString("F4"));
 
                 Console.WriteLine(
                     "\nENDING PIPE DETAILS");
@@ -384,20 +301,18 @@ namespace ConsoleApp2
 
                 Console.WriteLine(
                     "  Ending pipe distance: " +
-                    maximumPipeDistance.ToString("F4"));
+                    endingSide.PipeDistance.ToString("F4"));
 
-                // ============================================================
-                // CREATE COORDINATE SYSTEM 1
-                //   Origin          -> START_POINT
-                //   Direction 1     -> MID_POINT   ("use to project")
-                //   Direction 2     -> END_POINT   ("use to determine" = Y)
-                // ============================================================
+                Console.WriteLine(
+                    "\nSHORTER PIPE: " +
+                    (isStartingShorter ? "STARTING PIPE (" + startPoint.GetName() + ")" : "ENDING PIPE (" + endPoint.GetName() + ")") +
+                    " with distance: " + minimumPipeDistance.ToString("F4"));
 
                 Console.WriteLine(
                     "\n========================================");
 
                 Console.WriteLine(
-                    "CREATING COORDINATE_1");
+                    "CREATING COORDINATE_1 (at " + shorterPoint.GetName() + " on shorter pipe)");
 
                 Console.WriteLine(
                     "========================================");
@@ -405,10 +320,10 @@ namespace ConsoleApp2
                 IpfcModelItem coordinate1 =
                     CreateCoordinateSystem(
                         itemOwner,
-                        startPoint,
-                        midpoint,
-                        endPoint,
-                        "COORDINATE_1");
+                        shorterNode,
+                        "node13",
+                        longerNode,
+                        "BEND_DATA");
 
                 if (coordinate1 is null)
                 {
@@ -417,15 +332,10 @@ namespace ConsoleApp2
 
                     return;
                 }
-
-                // ============================================================
-                // CHECK Y DIRECTION
-                // ============================================================
-
                 bool yOutward =
                     IsYAxisPointingOutward(
                         coordinate1,
-                        startPoint,
+                        shorterPoint,
                         midpoint);
 
                 Console.WriteLine(
@@ -485,17 +395,11 @@ namespace ConsoleApp2
                     Console.WriteLine(
                         "No flip required.");
                 }
-
-                // ============================================================
-                // CREATE COORDINATE SYSTEM 2
-                //   Same references, same position as COORDINATE_1.
-                // ============================================================
-
                 Console.WriteLine(
                     "\n========================================");
 
                 Console.WriteLine(
-                    "CREATING COORDINATE_2");
+                    "CREATING COORDINATE_2 (at " + shorterPoint.GetName() + " on shorter pipe)");
 
                 Console.WriteLine(
                     "========================================");
@@ -503,10 +407,10 @@ namespace ConsoleApp2
                 IpfcModelItem coordinate2 =
                     CreateCoordinateSystem(
                         itemOwner,
-                        startPoint,
-                        midpoint,
-                        endPoint,
-                        "COORDINATE_2");
+                        shorterNode,
+                        "node13",
+                        longerNode,
+                        "PIPE_BOUND_BOX");
 
                 if (coordinate2 is null)
                 {
@@ -515,16 +419,6 @@ namespace ConsoleApp2
 
                     return;
                 }
-
-                // ============================================================
-                // AUTOMATIC FLIP FOR COORDINATE_2
-                //
-                // COORDINATE_2 is built from the exact same three references,
-                // so its Y axis starts out pointing the same way COORDINATE_1's
-                // did BEFORE any user flip. If that original direction was
-                // outward, COORDINATE_2 needs the same flip -- automatically,
-                // with no prompt.
-                // ============================================================
 
                 if (yOutward)
                 {
@@ -555,10 +449,6 @@ namespace ConsoleApp2
                         "COORDINATE_1's original Y direction was inward. " +
                         "No flip needed for COORDINATE_2.");
                 }
-
-                // ============================================================
-                // FINAL REGENERATION
-                // ============================================================
 
                 solid.Regenerate(null);
 
@@ -603,45 +493,11 @@ namespace ConsoleApp2
                     ex.Message);
             }
         }
-
-        // ====================================================================
-        // CREATE COORDINATE SYSTEM
-        // ====================================================================
-        //
-        // IMPORTANT FIX vs. the previous version:
-        //
-        // The API's CurrentSelectionBuffer (used by SelectModelItem()) and
-        // the interactive UI dialog's own collector state are two SEPARATE
-        // things -- populating one does not feed the other. That is why the
-        // dialog's Origin/Direction1/Direction2 collectors kept ending up
-        // empty or wrong no matter how the calls were ordered.
-        //
-        // This version drops SelectModelItem() entirely for these three
-        // references and instead TYPES each point's real name straight into
-        // its collector field with `~ Input` / `~ Update`, exactly the same
-        // technique this file already uses successfully for the coordinate
-        // system's own Name field (t3.datum_csys_name, further down). Since
-        // CreatePipeTree() always renames these points to START_POINT /
-        // MID_POINT / END_POINT before this function runs, each collector
-        // can resolve its reference purely from the typed name -- no 3D pick
-        // and no dependence on the API selection buffer at all.
-        //
-        // Sequence per reference: Focus -> FocusIn -> Input(name) ->
-        // Update(name) -> FocusOut.
-        //
-        // NOTE: exact widget names (`t1.OriginPlacement`, `t2.DirectionTable1`,
-        // `t2.AxisMenu1`, etc.) are taken from your original recorded mapkey.
-        // If your Creo version/language renders different dialog IDs, re-record
-        // a trail doing this exact sequence and swap in the real widget names --
-        // the underlying technique (type the name in, then Update) is what
-        // needs to be preserved.
-        // ====================================================================
-
         private static IpfcModelItem CreateCoordinateSystem(
             IpfcModelItemOwner itemOwner,
-            IpfcModelItem startPoint,
-            IpfcModelItem midpoint,
-            IpfcModelItem endPoint,
+            string originNode,
+            string ref1Node,
+            string ref2Node,
             string coordinateName)
         {
             try
@@ -651,76 +507,61 @@ namespace ConsoleApp2
                         EpfcModelItemType.EpfcITEM_COORD_SYS);
 
                 int countBefore = before?.Count ?? 0;
-
-                // IMPORTANT:
-                // Do NOT use CurrentSelectionBuffer for the CSYS references.
-                // The rerecorded Creo mapkey explicitly drives the CSYS
-                // dashboard collectors and selects the three point features
-                // from the model tree:
-                //
-                // T3 10 -> Origin
-                // T3 13 -> Direction 1 / reference
-                // T3 14 -> Direction 2 / reference
-                //
-                // This is intentionally replayed exactly as recorded.
-                // The point features have already been created before this
-                // method is called.
-
                 string coordinateMapkey =
+                    "~ Activate `main_dlg_cur` `page_Model_control_btn` 1;" +
                     "~ Command `ProCmdDatumCsys` ;" +
-                    "~ Move `Odui_Dlg_00` `Odui_Dlg_00` 2 22.101167 5.852140;" +
+                    "~ Move `Odui_Dlg_00` `Odui_Dlg_00` 2 20.433695 5.744787;" +
                     "~ Trigger `Odui_Dlg_00` `t1.OriginPlacement` 2 `DuMmY` `constr`;" +
                     "~ Focus `Odui_Dlg_00` `t1.OriginPlacement`;" +
                     "~ FocusIn `Odui_Dlg_00` `t1.OriginPlacement`;" +
                     "~ Select `Odui_Dlg_00` `t1.OriginPlacement` 2 `DuMmY` `constr`;" +
-                    "~ Timer `` `` `CollectorWdg_FocusTimer`;" +
                     "~ Trigger `Odui_Dlg_00` `t1.OriginPlacement` 2 `` ``;" +
+                    "~ Timer `UI Desktop` `UI Desktop` `CollectorWdg_FocusTimer`;" +
                     "~ FocusOut `Odui_Dlg_00` `t1.OriginPlacement`;" +
-                    "~ Select `main_dlg_cur` `PHTLeft.AssyTree` 1 `T3 10`;" +
+                    "~ Select `main_dlg_cur` `PHTLeft.AssyTree` 1 `" + originNode + "`;" +
+                    "~ Trigger `Odui_Dlg_00` `t1.OriginPlacement` 2 `0` `constr`;" +
+                    "~ Trigger `Odui_Dlg_00` `t1.OriginPlacement` 2 `` ``;" +
                     "~ Select `Odui_Dlg_00` `pg_vis_tab` 1 `tab_2`;" +
-                    "~ Trigger `Odui_Dlg_00` `t2.DirectionTable1` 2 `DuMmY` `ref`;" +
-                    "~ Trigger `Odui_Dlg_00` `t2.DirectionTable1` 2 `` ``;" +
                     "~ Trigger `Odui_Dlg_00` `t2.DirectionTable1` 2 `DuMmY` `ref`;" +
                     "~ Focus `Odui_Dlg_00` `t2.DirectionTable1`;" +
                     "~ FocusIn `Odui_Dlg_00` `t2.DirectionTable1`;" +
                     "~ Select `Odui_Dlg_00` `t2.DirectionTable1` 2 `DuMmY` `ref`;" +
-                    "~ Timer `` `` `CollectorWdg_FocusTimer`;" +
                     "~ Trigger `Odui_Dlg_00` `t2.DirectionTable1` 2 `` ``;" +
+                    "~ Timer `UI Desktop` `UI Desktop` `CollectorWdg_FocusTimer`;" +
                     "~ FocusOut `Odui_Dlg_00` `t2.DirectionTable1`;" +
-                    "~ Select `main_dlg_cur` `PHTLeft.AssyTree` 1 `T3 13`;" +
-                    "~ Trigger `Odui_Dlg_00` `t2.DirectionTable2` 2 `DuMmY` `ref2`;" +
-                    "~ Trigger `Odui_Dlg_00` `t2.DirectionTable2` 2 `` ``;" +
-                    "~ Open `Odui_Dlg_00` `t2.AxisMenu1`;" +
-                    "~ Close `Odui_Dlg_00` `t2.AxisMenu1`;" +
-                    "~ Select `Odui_Dlg_00` `t2.AxisMenu1` 1 `Axis_Y`;" +
+                    "~ Select `main_dlg_cur` `PHTLeft.AssyTree` 1 `" + ref1Node + "`;" +
                     "~ Trigger `Odui_Dlg_00` `t2.DirectionTable2` 2 `DuMmY` `ref2`;" +
                     "~ Focus `Odui_Dlg_00` `t2.DirectionTable2`;" +
                     "~ FocusIn `Odui_Dlg_00` `t2.DirectionTable2`;" +
                     "~ Select `Odui_Dlg_00` `t2.DirectionTable2` 2 `DuMmY` `ref2`;" +
-                    "~ Timer `` `` `CollectorWdg_FocusTimer`;" +
                     "~ Trigger `Odui_Dlg_00` `t2.DirectionTable2` 2 `` ``;" +
+                    "~ Timer `UI Desktop` `UI Desktop` `CollectorWdg_FocusTimer`;" +
                     "~ FocusOut `Odui_Dlg_00` `t2.DirectionTable2`;" +
-                    "~ Select `main_dlg_cur` `PHTLeft.AssyTree` 1 `T3 14`;" +
+                    "~ Select `main_dlg_cur` `PHTLeft.AssyTree` 1 `" + ref2Node + "`;" +
+                    "~ Open `Odui_Dlg_00` `t2.AxisMenu1`;~ Close `Odui_Dlg_00` `t2.AxisMenu1`;" +
+                    "~ Select `Odui_Dlg_00` `t2.AxisMenu1` 1 `Axis_Y`;" +
+                    "~ Trigger `Odui_Dlg_00` `t2.DirectionTable2` 2 `0` `ref2`;" +
+                    "~ Trigger `Odui_Dlg_00` `t2.DirectionTable2` 2 `` ``;" +
                     "~ Trigger `Odui_Dlg_00` `t2.DirectionTable2` 2 `0` `ref2`;" +
                     "~ Trigger `Odui_Dlg_00` `t2.DirectionTable2` 2 `` ``;" +
                     "~ Trigger `Odui_Dlg_00` `t2.DirectionTable1` 2 `0` `ref`;" +
                     "~ Trigger `Odui_Dlg_00` `t2.DirectionTable1` 2 `` ``;" +
                     "~ Select `Odui_Dlg_00` `pg_vis_tab` 1 `tab_3`;" +
-                    "~ Input `Odui_Dlg_00` `t3.datum_csys_name` `" +
-                    coordinateName + "`;" +
-                    "~ Update `Odui_Dlg_00` `t3.datum_csys_name` `" +
-                    coordinateName + "`;" +
+                    "~ Update `Odui_Dlg_00` `t3.datum_csys_name` `" + coordinateName + "`;" +
                     "~ FocusOut `Odui_Dlg_00` `t3.datum_csys_name`;" +
+                    "~ Select `Odui_Dlg_00` `pg_vis_tab` 1 `tab_2`;" +
+                    "~ Trigger `Odui_Dlg_00` `t2.DirectionTable1` 2 `0` `ref`;" +
+                    "~ Trigger `Odui_Dlg_00` `t2.DirectionTable1` 2 `` ``;" +
+                    "~ Trigger `Odui_Dlg_00` `t2.DirectionTable2` 2 `0` `ref2`;" +
+                    "~ Trigger `Odui_Dlg_00` `t2.DirectionTable2` 2 `` ``;" +
                     "~ Activate `Odui_Dlg_00` `stdbtn_1`;";
 
                 Console.WriteLine(
                     "Creating " + coordinateName +
-                    " using the rerecorded CSYS mapkey...");
+                    " using the CSYS mapkey...");
 
                 Session.RunMacro(coordinateMapkey);
-
-                // Give Creo enough time to finish the dashboard operation.
-                Thread.Sleep(2200);
+                Thread.Sleep(2500);
 
                 IpfcModelItems after =
                     itemOwner.ListItems(
@@ -736,9 +577,6 @@ namespace ConsoleApp2
 
                 IpfcModelItem coordinateSystem =
                     after[after.Count - 1];
-
-                // The mapkey already sets the Creo CSYS property name.
-                // Keep SetName as a safety check only.
                 SetModelItemName(
                     coordinateSystem,
                     coordinateName);
@@ -757,11 +595,6 @@ namespace ConsoleApp2
                 return null;
             }
         }
-
-        // ====================================================================
-        // SELECT MODEL ITEM
-        // ====================================================================
-
         private static void SelectModelItem(
             IpfcModelItem modelItem)
         {
@@ -803,11 +636,6 @@ namespace ConsoleApp2
                 "Selected model item: " +
                 modelItem.GetName());
         }
-
-        // ====================================================================
-        // Y AXIS DIRECTION CHECK
-        // ====================================================================
-
         private static bool IsYAxisPointingOutward(
             IpfcModelItem coordinateSystemItem,
             IpfcModelItem startPoint,
@@ -919,10 +747,6 @@ namespace ConsoleApp2
             }
         }
 
-        // ====================================================================
-        // GET POINT COORDINATES
-        // ====================================================================
-
         private static double[] GetModelItemCoordinates(
             IpfcModelItem modelItem)
         {
@@ -960,11 +784,6 @@ namespace ConsoleApp2
                 point[2]
             };
         }
-
-        // ====================================================================
-        // VECTOR LENGTH
-        // ====================================================================
-
         private static double VectorLength(
             double[] vector)
         {
@@ -973,40 +792,6 @@ namespace ConsoleApp2
                 vector[1] * vector[1] +
                 vector[2] * vector[2]);
         }
-
-        // ====================================================================
-        // COORDINATE SYSTEM Y-AXIS FLIP  (macro-based)
-        // ====================================================================
-        //
-        // We do NOT call transform.SetYAxis(...) here. Both an API attempt
-        // hit real compile errors in your pfcls build (read-only indexers,
-        // read-only CoordSys property, missing creator type) because that
-        // typed surface isn't documented anywhere I have access to, and I'd
-        // just be guessing at member names one at a time.
-        //
-        // Instead this flips the Y axis the same way the rest of this file
-        // already does automation -- by selecting the feature and replaying
-        // a macro, exactly like CreateAxisFromCylinder() / CreateCoordinateSystem()
-        // already do successfully. This is guaranteed to compile since it's
-        // just a string passed to Session.RunMacro().
-        //
-        // ACTION NEEDED FROM YOU:
-        // The FLIP_Y_MAPKEY constant below is a best-effort placeholder
-        // (Edit Definition -> Orientation tab -> re-toggle the Y reference).
-        // To get the exact, guaranteed-correct widget names for YOUR Creo
-        // version: record a short trail (File > Options > or right-click
-        // the coordinate system in the model tree) doing exactly:
-        //   1) Select the coordinate system feature
-        //   2) Edit Definition
-        //   3) Click whatever "Flip" control reverses the Y direction
-        //      (icon button next to the axis, or re-picking the direction
-        //      reference) 
-        //   4) OK
-        // Then paste the resulting "~ ..." lines from the trail file (.tst)
-        // here in place of FLIP_Y_MAPKEY -- everything else in this function
-        // (selection, error handling, return value) stays the same.
-        // ====================================================================
-
         private const string FLIP_Y_MAPKEY =
             "~ Command `ProCmdFeatEdit` ;" +
             "~ Select `Odui_Dlg_00` `pg_vis_tab` 1 `tab_2`;" +
@@ -1068,10 +853,6 @@ namespace ConsoleApp2
             }
         }
 
-        // ====================================================================
-        // SET NAME
-        // ====================================================================
-
         private static void SetModelItemName(
             IpfcModelItem modelItem,
             string name)
@@ -1101,11 +882,6 @@ namespace ConsoleApp2
                     ex.Message);
             }
         }
-
-        // ====================================================================
-        // FIND TERMINAL SIDES
-        // ====================================================================
-
         private static List<TerminalSide> FindTerminalSides(
             IpfcModelItemOwner itemOwner)
         {
@@ -1278,11 +1054,6 @@ namespace ConsoleApp2
 
             return result;
         }
-
-        // ====================================================================
-        // FIND CYLINDERS
-        // ====================================================================
-
         private static List<CylinderInfo> FindDistinctCylinders(
             IpfcModelItemOwner itemOwner)
         {
@@ -1349,10 +1120,6 @@ namespace ConsoleApp2
             return result;
         }
 
-        // ====================================================================
-        // MATCH CYLINDERS
-        // ====================================================================
-
         private static void MatchCylindersToTerminalSides(
             List<TerminalSide> terminalSides,
             List<CylinderInfo> cylinders)
@@ -1410,11 +1177,6 @@ namespace ConsoleApp2
                     cylinders[0]);
             }
         }
-
-        // ====================================================================
-        // ASSIGN CYLINDER
-        // ====================================================================
-
         private static void AssignCylinder(
             TerminalSide side,
             CylinderInfo cylinder)
@@ -1429,9 +1191,6 @@ namespace ConsoleApp2
                 cylinder.Index;
         }
 
-        // ====================================================================
-        // CREATE AXIS
-        // ====================================================================
 
         private static void CreateAxisFromCylinder(
             IpfcSurface cylinderSurface)
@@ -1459,11 +1218,6 @@ namespace ConsoleApp2
 
             Thread.Sleep(1200);
         }
-
-        // ====================================================================
-        // CREATE DATUM POINT
-        // ====================================================================
-
         private static IpfcModelItem CreateDatumPointAtEdgeCenter(
             IpfcModelItemOwner itemOwner,
             IpfcEdge edge)
@@ -1526,10 +1280,6 @@ namespace ConsoleApp2
                 pointsAfter.Count - 1];
         }
 
-        // ====================================================================
-        // DISTANCE
-        // ====================================================================
-
         private static double GetSelectionDistance(
             IpfcModelItem item1,
             IpfcModelItem item2)
@@ -1571,11 +1321,6 @@ namespace ConsoleApp2
 
             return Math.Abs(distance);
         }
-
-        // ====================================================================
-        // SURFACE DISTANCE
-        // ====================================================================
-
         private static double GetSurfaceDistance(
             IpfcSurface planeSurface,
             IpfcSurface cylinderSurface)
@@ -1584,11 +1329,6 @@ namespace ConsoleApp2
                 (IpfcModelItem)planeSurface,
                 (IpfcModelItem)cylinderSurface);
         }
-
-        // ====================================================================
-        // SAFE SURFACE DISTANCE
-        // ====================================================================
-
         private static double GetSafeSurfaceDistance(
             IpfcSurface planeSurface,
             IpfcSurface cylinderSurface)
@@ -1604,10 +1344,6 @@ namespace ConsoleApp2
                 return double.MaxValue;
             }
         }
-
-        // ====================================================================
-        // SURFACE ORIGIN
-        // ====================================================================
 
         private static double[] GetSurfaceOrigin(
             IpfcSurface surface)
@@ -1625,10 +1361,6 @@ namespace ConsoleApp2
                 matrix[3, 2]
             };
         }
-
-        // ====================================================================
-        // DISTANCE
-        // ====================================================================
 
         private static double Distance(
             double[] point1,
@@ -1657,9 +1389,6 @@ namespace ConsoleApp2
                 Math.Pow(z1 - z2, 2.0));
         }
 
-        // ====================================================================
-        // CONNECT
-        // ====================================================================
 
         public static void Connect()
         {
@@ -1686,11 +1415,6 @@ namespace ConsoleApp2
                 ConnectSecondTime();
             }
         }
-
-        // ====================================================================
-        // SECOND CONNECT
-        // ====================================================================
-
         private static void ConnectSecondTime()
         {
             try
@@ -1716,9 +1440,6 @@ namespace ConsoleApp2
             }
         }
 
-        // ====================================================================
-        // KILL PROCESS
-        // ====================================================================
 
         private static void KillProcess(
             string processName)
