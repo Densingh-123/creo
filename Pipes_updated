@@ -387,31 +387,36 @@ namespace ConsoleApp2
         }
 
         // =====================================================================
-        // CHECK AND DELETE EXISTING ITEMS (GUARANTEED MULTI-STAGE DELETION)
+        // CHECK AND DELETE EXISTING ITEMS (PROPER PRO/ENGINEER CREO MACRO DELETION)
         // =====================================================================
+
+        private static bool IsPipeTargetName(string name)
+        {
+            if (string.IsNullOrEmpty(name)) return false;
+            string upper = name.ToUpperInvariant().Trim();
+            return upper == "PIPE_START_POINT" ||
+                   upper == "PIPE_Z_POINT" ||
+                   upper == "PIPE_END_POINT" ||
+                   upper == "PIPE_AXIS_START" ||
+                   upper == "PIPE_AXIS_END" ||
+                   upper == "BEND_DATA" ||
+                   upper == "PIPE_BOUND_BOX" ||
+                   upper.Contains("PIPE_START") ||
+                   upper.Contains("PIPE_END") ||
+                   upper.Contains("PIPE_Z") ||
+                   upper.Contains("PIPE_AXIS") ||
+                   upper.Contains("BEND_DATA") ||
+                   upper.Contains("BOUND_BOX");
+        }
 
         private static bool CheckAndDeleteExistingItems(IpfcModelItemOwner featureOwner)
         {
-            List<string> targetNames = new List<string>
-            {
-                "BEND_DATA", "PIPE_BOUND_BOX",
-                "PIPE_AXIS_START", "PIPE_AXIS_END",
-                "PIPE_START_POINT", "PIPE_Z_POINT", "PIPE_END_POINT"
-            };
-
             List<string> existingItems = new List<string>();
 
-            CollectNamedItems(featureOwner.ListItems(EpfcModelItemType.EpfcITEM_COORD_SYS),
-                new[] { "BEND_DATA", "PIPE_BOUND_BOX" },
-                "Coord System", existingItems);
-
-            CollectNamedItems(featureOwner.ListItems(EpfcModelItemType.EpfcITEM_AXIS),
-                new[] { "PIPE_AXIS_START", "PIPE_AXIS_END" },
-                "Axis", existingItems);
-
-            CollectNamedItems(featureOwner.ListItems(EpfcModelItemType.EpfcITEM_POINT),
-                new[] { "PIPE_START_POINT", "PIPE_Z_POINT", "PIPE_END_POINT" },
-                "Point", existingItems);
+            CollectPipeItems(featureOwner.ListItems(EpfcModelItemType.EpfcITEM_COORD_SYS), "Coord System", existingItems);
+            CollectPipeItems(featureOwner.ListItems(EpfcModelItemType.EpfcITEM_AXIS), "Axis", existingItems);
+            CollectPipeItems(featureOwner.ListItems(EpfcModelItemType.EpfcITEM_POINT), "Point", existingItems);
+            CollectPipeItems(featureOwner.ListItems(EpfcModelItemType.EpfcITEM_FEATURE), "Feature", existingItems);
 
             if (existingItems.Count == 0)
             {
@@ -439,17 +444,79 @@ namespace ConsoleApp2
                 return false;
             }
 
-            // 1. First find tree nodes for existing items and delete via tree selection
-            Console.WriteLine("Deleting existing items via Model Tree selection...");
-            Dictionary<string, string> existingNodeNames = FindTreeNodeNames(targetNames);
-            if (existingNodeNames.Count > 0)
+            // Execute comprehensive deletion of all existing pipe items
+            DeleteExistingPipeItems(featureOwner);
+
+            Console.WriteLine("Existing items cleanup completed successfully.");
+            return true;
+        }
+
+        private static void CollectPipeItems(IpfcModelItems items, string prefix, List<string> existingItems)
+        {
+            if (items == null) return;
+            for (int i = 0; i < items.Count; i++)
             {
-                List<string> nodesToDelete = new List<string>(existingNodeNames.Values);
-                DeleteTreeNodes(nodesToDelete);
+                try
+                {
+                    string name = items[i].GetName();
+                    if (IsPipeTargetName(name))
+                    {
+                        string entry = prefix + ": " + name;
+                        if (!existingItems.Contains(entry))
+                            existingItems.Add(entry);
+                    }
+                }
+                catch { }
+            }
+        }
+
+        private static void DeleteExistingPipeItems(IpfcModelItemOwner featureOwner)
+        {
+            Console.WriteLine("\nExecuting complete deletion of existing pipe items...");
+
+            // Expand model tree first
+            try
+            {
+                Session.RunMacro("~ Command `ProCmdTreeExpandAll`;");
+                Thread.Sleep(300);
+            }
+            catch { }
+
+            // Stage 1: Model Tree scan and delete
+            int maxDeletions = 30;
+            for (int attempt = 1; attempt <= maxDeletions; attempt++)
+            {
+                string nodeName = FindSinglePipeTreeNode(out string foundTarget);
+                if (string.IsNullOrEmpty(nodeName))
+                {
+                    Console.WriteLine("No remaining pipe items found in Model Tree scan.");
+                    break;
+                }
+
+                Console.WriteLine("  Deleting pipe item '" + foundTarget + "' at " + nodeName + " via Creo macro...");
+
+                string deleteMacro =
+                    "~ Select `main_dlg_cur` `PHTLeft.AssyTree` 1 `" + nodeName + "`;" +
+                    "~ Command `ProCmdEditDelete` ;" +
+                    "~ Command `ProCmdFeatDelete` ;" +
+                    "~ Activate `del_feat_dlg` `OK`;" +
+                    "~ Activate `del_feat_dlg` `stdbtn_1`;" +
+                    "~ Activate `del_feat_dlg` `delete_btn`;" +
+                    "~ Activate `del_feat_dlg` `ok_btn`;" +
+                    "~ Activate `del_feat_dlg` `CommitBtn`;" +
+                    "~ Activate `Odui_Dlg_01` `stdbtn_1`;" +
+                    "~ Activate `Odui_Dlg_00` `stdbtn_1`;" +
+                    "~ Activate `main_dlg_cur` `stdbtn_1`;";
+
+                Session.RunMacro(deleteMacro);
+                Thread.Sleep(600);
             }
 
-            // 2. Also execute native Pro/TOOLKIT feature deletion
-            DeleteAllPipeFeaturesNative(featureOwner, targetNames);
+            // Stage 2: Direct ModelItem deletion by listing CSYS, Axes, Points, and Features
+            DeleteItemsByItemType(featureOwner, EpfcModelItemType.EpfcITEM_COORD_SYS);
+            DeleteItemsByItemType(featureOwner, EpfcModelItemType.EpfcITEM_AXIS);
+            DeleteItemsByItemType(featureOwner, EpfcModelItemType.EpfcITEM_POINT);
+            DeleteItemsByItemType(featureOwner, EpfcModelItemType.EpfcITEM_FEATURE);
 
             try
             {
@@ -458,171 +525,149 @@ namespace ConsoleApp2
                 Session.get_CurrentWindow().Repaint();
             }
             catch { }
-
-            Console.WriteLine("Existing items cleanup completed successfully.");
-            return true;
         }
 
-        private static void DeleteTreeNodes(List<string> nodeNames)
+        private static void DeleteItemsByItemType(IpfcModelItemOwner featureOwner, EpfcModelItemType itemType)
         {
-            // Delete in reverse order so children are deleted before parents
-            for (int i = nodeNames.Count - 1; i >= 0; i--)
+            IpfcSession creoSession = (IpfcSession)Session;
+            IpfcSelectionBuffer buffer = creoSession.CurrentSelectionBuffer;
+
+            for (int attempt = 0; attempt < 10; attempt++)
             {
-                string nodeName = nodeNames[i];
-                try
-                {
-                    Console.WriteLine("  Deleting tree node: " + nodeName);
-                    string mapkey =
-                        "~ Select `main_dlg_cur` `PHTLeft.AssyTree` 1 `" + nodeName + "`;" +
-                        "~ Command `ProCmdFeatDelete` ;" +
-                        "~ Activate `del_feat_dlg` `OK`;" +
-                        "~ Activate `del_feat_dlg` `stdbtn_1`;" +
-                        "~ Activate `del_feat_dlg` `delete_btn`;" +
-                        "~ Activate `Odui_Dlg_01` `stdbtn_1`;" +
-                        "~ Activate `Odui_Dlg_00` `stdbtn_1`;" +
-                        "~ Activate `main_dlg_cur` `stdbtn_1`;";
+                IpfcModelItems items = null;
+                try { items = featureOwner.ListItems(itemType); } catch { }
+                if (items == null || items.Count == 0) break;
 
-                    Session.RunMacro(mapkey);
-                    Thread.Sleep(500);
-                }
-                catch { }
-            }
-        }
-
-        private static void DeleteAllPipeFeaturesNative(IpfcModelItemOwner featureOwner, List<string> targetNames)
-        {
-            IpfcSolid solid = featureOwner as IpfcSolid ?? Session.CurrentModel as IpfcSolid;
-            if (solid == null) return;
-
-            try
-            {
-                CpfcFeatureOperations ops = new CpfcFeatureOperations();
-                HashSet<int> featIdsToDelete = new HashSet<int>();
-
-                // Scan all features in the model
-                IpfcModelItems features = featureOwner.ListItems(EpfcModelItemType.EpfcITEM_FEATURE);
-                if (features != null)
-                {
-                    for (int i = 0; i < features.Count; i++)
-                    {
-                        try
-                        {
-                            IpfcFeature feat = features[i] as IpfcFeature;
-                            if (feat == null) continue;
-
-                            string featName = "";
-                            try { featName = ((IpfcModelItem)feat).GetName(); } catch { }
-
-                            bool matches = false;
-                            if (!string.IsNullOrEmpty(featName) && targetNames.Contains(featName))
-                            {
-                                matches = true;
-                            }
-                            else
-                            {
-                                // Check sub points
-                                IpfcModelItems pts = feat.ListSubItems(EpfcModelItemType.EpfcITEM_POINT);
-                                if (pts != null)
-                                {
-                                    for (int p = 0; p < pts.Count; p++)
-                                    {
-                                        string pName = pts[p].GetName();
-                                        if (!string.IsNullOrEmpty(pName) && targetNames.Contains(pName)) { matches = true; break; }
-                                    }
-                                }
-                                if (!matches)
-                                {
-                                    IpfcModelItems axes = feat.ListSubItems(EpfcModelItemType.EpfcITEM_AXIS);
-                                    if (axes != null)
-                                    {
-                                        for (int a = 0; a < axes.Count; a++)
-                                        {
-                                            string aName = axes[a].GetName();
-                                            if (!string.IsNullOrEmpty(aName) && targetNames.Contains(aName)) { matches = true; break; }
-                                        }
-                                    }
-                                }
-                                if (!matches)
-                                {
-                                    IpfcModelItems csys = feat.ListSubItems(EpfcModelItemType.EpfcITEM_COORD_SYS);
-                                    if (csys != null)
-                                    {
-                                        for (int c = 0; c < csys.Count; c++)
-                                        {
-                                            string cName = csys[c].GetName();
-                                            if (!string.IsNullOrEmpty(cName) && targetNames.Contains(cName)) { matches = true; break; }
-                                        }
-                                    }
-                                }
-                            }
-
-                            int featId = ((IpfcModelItem)feat).Id;
-                            if (matches && !featIdsToDelete.Contains(featId))
-                            {
-                                featIdsToDelete.Add(featId);
-                                string displayName = !string.IsNullOrEmpty(featName) ? featName : (feat.FeatTypeName + " #" + featId);
-                                Console.WriteLine("  Queueing feature for native deletion: " + displayName);
-                                IpfcDeleteOperation delOp = feat.CreateDeleteOp();
-                                delOp.Clip = true;
-                                delOp.AllowGroupMembers = true;
-                                delOp.AllowChildGroupMembers = true;
-                                ops.Append(delOp);
-                            }
-                        }
-                        catch { }
-                    }
-                }
-
-                // Also try GetFeatureByName for each target name directly
-                foreach (string name in targetNames)
+                bool deletedAny = false;
+                for (int i = 0; i < items.Count; i++)
                 {
                     try
                     {
-                        IpfcFeature feat = solid.GetFeatureByName(name);
-                        if (feat != null)
+                        IpfcModelItem item = items[i];
+                        string name = item.GetName();
+
+                        if (IsPipeTargetName(name))
                         {
-                            int featId = ((IpfcModelItem)feat).Id;
-                            if (!featIdsToDelete.Contains(featId))
-                            {
-                                featIdsToDelete.Add(featId);
-                                Console.WriteLine("  Queueing feature by name: " + name + " (ID=" + featId + ")");
-                                IpfcDeleteOperation delOp = feat.CreateDeleteOp();
-                                delOp.Clip = true;
-                                delOp.AllowGroupMembers = true;
-                                delOp.AllowChildGroupMembers = true;
-                                ops.Append(delOp);
-                            }
+                            Console.WriteLine("  Direct deleting " + itemType + ": " + name);
+                            buffer.Clear();
+                            IpfcSelection sel = new CMpfcSelect().CreateModelItemSelection(item, null);
+                            buffer.AddSelection(sel);
+
+                            string delMacro =
+                                "~ Command `ProCmdEditDelete` ;" +
+                                "~ Command `ProCmdFeatDelete` ;" +
+                                "~ Activate `del_feat_dlg` `OK`;" +
+                                "~ Activate `del_feat_dlg` `stdbtn_1`;" +
+                                "~ Activate `del_feat_dlg` `delete_btn`;" +
+                                "~ Activate `del_feat_dlg` `ok_btn`;" +
+                                "~ Activate `del_feat_dlg` `CommitBtn`;" +
+                                "~ Activate `Odui_Dlg_01` `stdbtn_1`;" +
+                                "~ Activate `Odui_Dlg_00` `stdbtn_1`;" +
+                                "~ Activate `main_dlg_cur` `stdbtn_1`;";
+
+                            Session.RunMacro(delMacro);
+                            Thread.Sleep(600);
+                            deletedAny = true;
+                            break;
                         }
                     }
                     catch { }
                 }
 
-                if (ops.Count > 0)
-                {
-                    Console.WriteLine("Executing native feature deletion of " + ops.Count + " feature(s)...");
-                    solid.ExecuteFeatureOps(ops, null);
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine("Note on native delete: " + ex.Message);
+                if (!deletedAny) break;
             }
         }
 
-        private static void CollectNamedItems(IpfcModelItems items, string[] names,
-            string prefix, List<string> existingItems)
+        private static string FindSinglePipeTreeNode(out string foundTargetName)
         {
-            if (items == null) return;
-            for (int i = 0; i < items.Count; i++)
+            foundTargetName = null;
+            IpfcSession creoSession = (IpfcSession)Session;
+            IpfcSelectionBuffer buffer = creoSession.CurrentSelectionBuffer;
+
+            int consecutiveMisses = 0;
+            for (int i = 1; i <= 300; i++)
             {
+                string nodeName = "node" + i;
                 try
                 {
-                    string name = items[i].GetName();
-                    if (!string.IsNullOrEmpty(name) && Array.IndexOf(names, name) >= 0)
-                        existingItems.Add(prefix + ": " + name);
+                    buffer.Clear();
+                    string mapkey = "~ Select `main_dlg_cur` `PHTLeft.AssyTree` 1 `" + nodeName + "`;";
+                    Session.RunMacro(mapkey);
+                    Thread.Sleep(40);
+
+                    IpfcSelections contents = buffer.Contents;
+                    if (contents != null && contents.Count > 0)
+                    {
+                        consecutiveMisses = 0;
+                        IpfcModelItem selItem = contents[0]?.get_SelItem();
+                        if (selItem != null)
+                        {
+                            string foundName = "";
+                            try { foundName = selItem.GetName(); } catch { }
+
+                            if (IsPipeTargetName(foundName))
+                            {
+                                foundTargetName = foundName;
+                                return nodeName;
+                            }
+                            else if (selItem is IpfcFeature feat)
+                            {
+                                try
+                                {
+                                    string featName = ((IpfcModelItem)feat).GetName();
+                                    if (IsPipeTargetName(featName))
+                                    {
+                                        foundTargetName = featName;
+                                        return nodeName;
+                                    }
+
+                                    IpfcModelItems subPoints = feat.ListSubItems(EpfcModelItemType.EpfcITEM_POINT);
+                                    if (subPoints != null)
+                                    {
+                                        for (int k = 0; k < subPoints.Count; k++)
+                                        {
+                                            string pName = subPoints[k].GetName();
+                                            if (IsPipeTargetName(pName)) { foundTargetName = pName; return nodeName; }
+                                        }
+                                    }
+
+                                    IpfcModelItems subAxes = feat.ListSubItems(EpfcModelItemType.EpfcITEM_AXIS);
+                                    if (subAxes != null)
+                                    {
+                                        for (int k = 0; k < subAxes.Count; k++)
+                                        {
+                                            string aName = subAxes[k].GetName();
+                                            if (IsPipeTargetName(aName)) { foundTargetName = aName; return nodeName; }
+                                        }
+                                    }
+
+                                    IpfcModelItems subCsys = feat.ListSubItems(EpfcModelItemType.EpfcITEM_COORD_SYS);
+                                    if (subCsys != null)
+                                    {
+                                        for (int c = 0; c < subCsys.Count; c++)
+                                        {
+                                            string cName = subCsys[c].GetName();
+                                            if (IsPipeTargetName(cName)) { foundTargetName = cName; return nodeName; }
+                                        }
+                                    }
+                                }
+                                catch { }
+                            }
+                        }
+                    }
+                    else
+                    {
+                        consecutiveMisses++;
+                        if (consecutiveMisses > 35 && i > 50)
+                        {
+                            break;
+                        }
+                    }
                 }
                 catch { }
             }
+
+            return null;
         }
 
         // =====================================================================
@@ -658,7 +703,7 @@ namespace ConsoleApp2
 
                     string mapkey = "~ Select `main_dlg_cur` `PHTLeft.AssyTree` 1 `" + nodeName + "`;";
                     Session.RunMacro(mapkey);
-                    Thread.Sleep(60);
+                    Thread.Sleep(50);
 
                     IpfcSelections contents = buffer.Contents;
                     if (contents != null && contents.Count > 0)
@@ -675,7 +720,7 @@ namespace ConsoleApp2
                                 string targetName = remaining[j];
                                 bool matched = false;
 
-                                if (!string.IsNullOrEmpty(foundName) && foundName == targetName)
+                                if (!string.IsNullOrEmpty(foundName) && foundName.Equals(targetName, StringComparison.OrdinalIgnoreCase))
                                 {
                                     matched = true;
                                 }
@@ -684,7 +729,7 @@ namespace ConsoleApp2
                                     try
                                     {
                                         IpfcModelItem featModelItem = feat as IpfcModelItem;
-                                        if (featModelItem != null && featModelItem.GetName() == targetName)
+                                        if (featModelItem != null && featModelItem.GetName().Equals(targetName, StringComparison.OrdinalIgnoreCase))
                                         {
                                             matched = true;
                                         }
@@ -696,7 +741,7 @@ namespace ConsoleApp2
                                             {
                                                 for (int k = 0; k < subPoints.Count; k++)
                                                 {
-                                                    if (subPoints[k].GetName() == targetName) { matched = true; break; }
+                                                    if (subPoints[k].GetName().Equals(targetName, StringComparison.OrdinalIgnoreCase)) { matched = true; break; }
                                                 }
                                             }
                                             if (!matched)
@@ -706,7 +751,18 @@ namespace ConsoleApp2
                                                 {
                                                     for (int k = 0; k < subAxes.Count; k++)
                                                     {
-                                                        if (subAxes[k].GetName() == targetName) { matched = true; break; }
+                                                        if (subAxes[k].GetName().Equals(targetName, StringComparison.OrdinalIgnoreCase)) { matched = true; break; }
+                                                    }
+                                                }
+                                            }
+                                            if (!matched)
+                                            {
+                                                IpfcModelItems subCsys = feat.ListSubItems(EpfcModelItemType.EpfcITEM_COORD_SYS);
+                                                if (subCsys != null)
+                                                {
+                                                    for (int c = 0; c < subCsys.Count; c++)
+                                                    {
+                                                        if (subCsys[c].GetName().Equals(targetName, StringComparison.OrdinalIgnoreCase)) { matched = true; break; }
                                                     }
                                                 }
                                             }
@@ -811,7 +867,7 @@ namespace ConsoleApp2
 
                 // 3. Create START_POINT at starting circular edge center
                 Console.WriteLine("\nCreating PIPE_START_POINT...");
-                IpfcModelItem startPoint = CreateDatumPointAtEdgeCenter(featureOwner, startingSide.Edge);
+                IpfcModelItem startPoint = CreateDatumPointAtEdgeCenter(featureOwner, startingSide.Edge, "PIPE_START_POINT");
                 if (startPoint == null)
                 {
                     Console.WriteLine("ERROR: Could not create PIPE_START_POINT.");
@@ -822,7 +878,7 @@ namespace ConsoleApp2
 
                 // 4. Create START Axis from starting cylinder
                 Console.WriteLine("\nCreating PIPE_AXIS_START...");
-                IpfcModelItem axis1 = CreateAxisFromCylinder(featureOwner, startingSide.Cylinder);
+                IpfcModelItem axis1 = CreateAxisFromCylinder(featureOwner, startingSide.Cylinder, "PIPE_AXIS_START");
                 if (axis1 != null)
                 {
                     SetModelItemName(axis1, "PIPE_AXIS_START");
@@ -836,7 +892,7 @@ namespace ConsoleApp2
 
                 // 5. Create END Axis from ending cylinder
                 Console.WriteLine("\nCreating PIPE_AXIS_END...");
-                IpfcModelItem axis2 = CreateAxisFromCylinder(featureOwner, endingSide.Cylinder);
+                IpfcModelItem axis2 = CreateAxisFromCylinder(featureOwner, endingSide.Cylinder, "PIPE_AXIS_END");
                 if (axis2 != null)
                 {
                     SetModelItemName(axis2, "PIPE_AXIS_END");
@@ -860,6 +916,8 @@ namespace ConsoleApp2
                 axisBuffer.AddSelection(axisSelection2);
 
                 int pointCountBeforeMid = featureOwner.ListItems(EpfcModelItemType.EpfcITEM_POINT)?.Count ?? 0;
+                int featCountBeforeMid = featureOwner.ListItems(EpfcModelItemType.EpfcITEM_FEATURE)?.Count ?? 0;
+
                 string midpointMacro =
                     "~ Command `ProCmdDatumPointGeneral` ;" +
                     "~ Activate `Odui_Dlg_00` `stdbtn_1`;";
@@ -875,11 +933,18 @@ namespace ConsoleApp2
 
                 IpfcModelItem midpoint = pointsAfterMidpoint[pointsAfterMidpoint.Count - 1];
                 SetModelItemName(midpoint, "PIPE_Z_POINT");
+
+                IpfcModelItems featsAfterMid = featureOwner.ListItems(EpfcModelItemType.EpfcITEM_FEATURE);
+                if (featsAfterMid != null && featsAfterMid.Count > featCountBeforeMid)
+                {
+                    try { ((IpfcModelItem)featsAfterMid[featsAfterMid.Count - 1])?.SetName("PIPE_Z_POINT"); } catch { }
+                }
+
                 Console.WriteLine("PIPE_Z_POINT created: " + midpoint.GetName());
 
                 // 7. Create END_POINT at ending circular edge center
                 Console.WriteLine("\nCreating PIPE_END_POINT...");
-                IpfcModelItem endPoint = CreateDatumPointAtEdgeCenter(featureOwner, endingSide.Edge);
+                IpfcModelItem endPoint = CreateDatumPointAtEdgeCenter(featureOwner, endingSide.Edge, "PIPE_END_POINT");
                 if (endPoint == null)
                 {
                     Console.WriteLine("ERROR: Could not create PIPE_END_POINT.");
@@ -1265,6 +1330,15 @@ namespace ConsoleApp2
                 if (modelItem == null) return;
                 modelItem.SetName(name);
                 Console.WriteLine("  Model item renamed to: " + name);
+
+                if (modelItem is IpfcAxis axis)
+                {
+                    try { ((IpfcModelItem)axis.GetFeature())?.SetName(name); } catch { }
+                }
+                else if (modelItem is IpfcCoordSystem csys)
+                {
+                    try { ((IpfcModelItem)csys.GetFeature())?.SetName(name); } catch { }
+                }
             }
             catch (Exception ex)
             {
@@ -1549,7 +1623,8 @@ namespace ConsoleApp2
 
         private static IpfcModelItem CreateDatumPointAtEdgeCenter(
             IpfcModelItemOwner itemOwner,
-            IpfcEdge edge)
+            IpfcEdge edge,
+            string pointName)
         {
             try
             {
@@ -1563,6 +1638,9 @@ namespace ConsoleApp2
 
                 IpfcModelItems pointsBefore = itemOwner.ListItems(EpfcModelItemType.EpfcITEM_POINT);
                 int pointCountBefore = pointsBefore?.Count ?? 0;
+
+                IpfcModelItems featsBefore = itemOwner.ListItems(EpfcModelItemType.EpfcITEM_FEATURE);
+                int featCountBefore = featsBefore?.Count ?? 0;
 
                 string pointMacro =
                     "~ Command `ProCmdDatumPointGeneral` ;" +
@@ -1588,6 +1666,12 @@ namespace ConsoleApp2
                     return null;
                 }
 
+                IpfcModelItems featsAfter = itemOwner.ListItems(EpfcModelItemType.EpfcITEM_FEATURE);
+                if (featsAfter != null && featsAfter.Count > featCountBefore && !string.IsNullOrEmpty(pointName))
+                {
+                    try { ((IpfcModelItem)featsAfter[featsAfter.Count - 1])?.SetName(pointName); } catch { }
+                }
+
                 return pointsAfter[pointsAfter.Count - 1];
             }
             catch (Exception ex)
@@ -1599,7 +1683,8 @@ namespace ConsoleApp2
 
         private static IpfcModelItem CreateAxisFromCylinder(
             IpfcModelItemOwner itemOwner,
-            IpfcSurface cylinderSurface)
+            IpfcSurface cylinderSurface,
+            string axisName)
         {
             try
             {
@@ -1614,6 +1699,9 @@ namespace ConsoleApp2
                 IpfcModelItems axesBefore = itemOwner.ListItems(EpfcModelItemType.EpfcITEM_AXIS);
                 int countBefore = axesBefore?.Count ?? 0;
 
+                IpfcModelItems featsBefore = itemOwner.ListItems(EpfcModelItemType.EpfcITEM_FEATURE);
+                int featCountBefore = featsBefore?.Count ?? 0;
+
                 Session.RunMacro(
                     "~ Command `ProCmdDatumAxis` ;" +
                     "~ Activate `Odui_Dlg_01` `stdbtn_1`;" +
@@ -1625,6 +1713,12 @@ namespace ConsoleApp2
                 if (axesAfter == null || axesAfter.Count <= countBefore)
                 {
                     return null;
+                }
+
+                IpfcModelItems featsAfter = itemOwner.ListItems(EpfcModelItemType.EpfcITEM_FEATURE);
+                if (featsAfter != null && featsAfter.Count > featCountBefore && !string.IsNullOrEmpty(axisName))
+                {
+                    try { ((IpfcModelItem)featsAfter[featsAfter.Count - 1])?.SetName(axisName); } catch { }
                 }
 
                 return axesAfter[axesAfter.Count - 1];
