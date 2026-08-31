@@ -777,69 +777,64 @@ namespace ConsoleApp2
                                 int targetId = remaining[targetName];
                                 bool matched = false;
 
-                                if ((targetId > 0 && selId == targetId) ||
-                                    (!string.IsNullOrEmpty(foundName) && foundName.Equals(targetName, StringComparison.OrdinalIgnoreCase)))
+                                // STRICT ID MATCHING: When targetId is provided, we MUST match by ID!
+                                if (targetId > 0)
+                                {
+                                    if (selId == targetId)
+                                    {
+                                        matched = true;
+                                    }
+                                    else if (selItem is IpfcFeature feat)
+                                    {
+                                        try
+                                        {
+                                            IpfcModelItem featModelItem = feat as IpfcModelItem;
+                                            if (featModelItem != null && featModelItem.Id == targetId)
+                                            {
+                                                matched = true;
+                                            }
+                                            else
+                                            {
+                                                IpfcModelItems subPoints = feat.ListSubItems(EpfcModelItemType.EpfcITEM_POINT);
+                                                if (subPoints != null)
+                                                {
+                                                    for (int k = 0; k < subPoints.Count; k++)
+                                                    {
+                                                        if (subPoints[k].Id == targetId) { matched = true; break; }
+                                                    }
+                                                }
+
+                                                if (!matched)
+                                                {
+                                                    IpfcModelItems subAxes = feat.ListSubItems(EpfcModelItemType.EpfcITEM_AXIS);
+                                                    if (subAxes != null)
+                                                    {
+                                                        for (int k = 0; k < subAxes.Count; k++)
+                                                        {
+                                                            if (subAxes[k].Id == targetId) { matched = true; break; }
+                                                        }
+                                                    }
+                                                }
+
+                                                if (!matched)
+                                                {
+                                                    IpfcModelItems subCsys = feat.ListSubItems(EpfcModelItemType.EpfcITEM_COORD_SYS);
+                                                    if (subCsys != null)
+                                                    {
+                                                        for (int c = 0; c < subCsys.Count; c++)
+                                                        {
+                                                            if (subCsys[c].Id == targetId) { matched = true; break; }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        catch { }
+                                    }
+                                }
+                                else if (!string.IsNullOrEmpty(foundName) && foundName.Equals(targetName, StringComparison.OrdinalIgnoreCase))
                                 {
                                     matched = true;
-                                }
-                                else if (selItem is IpfcFeature feat)
-                                {
-                                    try
-                                    {
-                                        IpfcModelItem featModelItem = feat as IpfcModelItem;
-                                        if (featModelItem != null && ((targetId > 0 && featModelItem.Id == targetId) || (!string.IsNullOrEmpty(featModelItem.GetName()) && featModelItem.GetName().Equals(targetName, StringComparison.OrdinalIgnoreCase))))
-                                        {
-                                            matched = true;
-                                        }
-                                        else
-                                        {
-                                            IpfcModelItems subPoints = feat.ListSubItems(EpfcModelItemType.EpfcITEM_POINT);
-                                            if (subPoints != null)
-                                            {
-                                                for (int k = 0; k < subPoints.Count; k++)
-                                                {
-                                                    if ((targetId > 0 && subPoints[k].Id == targetId) || subPoints[k].GetName().Equals(targetName, StringComparison.OrdinalIgnoreCase))
-                                                    {
-                                                        matched = true;
-                                                        break;
-                                                    }
-                                                }
-                                            }
-
-                                            if (!matched)
-                                            {
-                                                IpfcModelItems subAxes = feat.ListSubItems(EpfcModelItemType.EpfcITEM_AXIS);
-                                                if (subAxes != null)
-                                                {
-                                                    for (int k = 0; k < subAxes.Count; k++)
-                                                    {
-                                                        if ((targetId > 0 && subAxes[k].Id == targetId) || subAxes[k].GetName().Equals(targetName, StringComparison.OrdinalIgnoreCase))
-                                                        {
-                                                            matched = true;
-                                                            break;
-                                                        }
-                                                    }
-                                                }
-                                            }
-
-                                            if (!matched)
-                                            {
-                                                IpfcModelItems subCsys = feat.ListSubItems(EpfcModelItemType.EpfcITEM_COORD_SYS);
-                                                if (subCsys != null)
-                                                {
-                                                    for (int c = 0; c < subCsys.Count; c++)
-                                                    {
-                                                        if ((targetId > 0 && subCsys[c].Id == targetId) || subCsys[c].GetName().Equals(targetName, StringComparison.OrdinalIgnoreCase))
-                                                        {
-                                                            matched = true;
-                                                            break;
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                    catch { }
                                 }
 
                                 if (matched)
@@ -903,6 +898,53 @@ namespace ConsoleApp2
             }
         }
 
+        private static List<double[]> GetTorusCenters(IpfcModelItemOwner itemOwner)
+        {
+            List<double[]> torusCenters = new List<double[]>();
+            try
+            {
+                IpfcModelItems surfaces = itemOwner.ListItems(EpfcModelItemType.EpfcITEM_SURFACE);
+                if (surfaces == null) return torusCenters;
+
+                const double CENTER_TOLERANCE = 2.0;
+                for (int i = 0; i < surfaces.Count; i++)
+                {
+                    try
+                    {
+                        IpfcSurface surf = (IpfcSurface)surfaces[i];
+                        if (surf.GetSurfaceType() == (int)EpfcSurfaceType.EpfcSURFACE_TORUS)
+                        {
+                            IpfcTransformedSurface trans = surf as IpfcTransformedSurface;
+                            if (trans != null && trans.CoordSys != null)
+                            {
+                                IpfcPoint3D origin = trans.CoordSys.GetOrigin();
+                                if (origin != null)
+                                {
+                                    double[] c = new double[] { origin[0], origin[1], origin[2] };
+                                    bool isDuplicate = false;
+                                    for (int k = 0; k < torusCenters.Count; k++)
+                                    {
+                                        if (Distance(c, torusCenters[k]) < CENTER_TOLERANCE)
+                                        {
+                                            isDuplicate = true;
+                                            break;
+                                        }
+                                    }
+                                    if (!isDuplicate)
+                                    {
+                                        torusCenters.Add(c);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    catch { }
+                }
+            }
+            catch { }
+            return torusCenters;
+        }
+
         public static void CreatePipeTree()
         {
             try
@@ -933,27 +975,60 @@ namespace ConsoleApp2
                     return;
                 }
 
-                // Calculate distance to bend apex to determine the shortest pipe leg
-                double[] dir1 = GetCylinderAxisDirection(terminalSides[0].Cylinder);
-                double[] dir2 = GetCylinderAxisDirection(terminalSides[1].Cylinder);
-                double[] center1 = terminalSides[0].EdgeCenter;
-                double[] center2 = terminalSides[1].EdgeCenter;
+                // Determine shortest pipe leg (startingSide) vs longest leg (endingSide)
+                double distToBend0 = double.MaxValue;
+                double distToBend1 = double.MaxValue;
 
-                double dist1 = terminalSides[0].CylinderArea;
-                double dist2 = terminalSides[1].CylinderArea;
-
-                if (dir1 != null && dir2 != null && center1 != null && center2 != null)
+                List<double[]> torusCenters = GetTorusCenters(itemOwner);
+                if (torusCenters.Count > 0)
                 {
-                    double[] apexMath = CalculateApexPoint(center1, dir1, center2, dir2);
-                    if (apexMath != null)
+                    foreach (var tc in torusCenters)
                     {
-                        dist1 = Distance(center1, apexMath);
-                        dist2 = Distance(center2, apexMath);
+                        double d0 = Distance(terminalSides[0].EdgeCenter, tc);
+                        double d1 = Distance(terminalSides[1].EdgeCenter, tc);
+                        if (d0 < distToBend0) distToBend0 = d0;
+                        if (d1 < distToBend1) distToBend1 = d1;
                     }
                 }
 
-                TerminalSide startingSide = (dist1 <= dist2) ? terminalSides[0] : terminalSides[1];
-                TerminalSide endingSide = (dist1 <= dist2) ? terminalSides[1] : terminalSides[0];
+                double area0 = terminalSides[0].CylinderArea;
+                double area1 = terminalSides[1].CylinderArea;
+
+                bool is0Shorter = false;
+                if (distToBend0 < double.MaxValue && distToBend1 < double.MaxValue && Math.Abs(distToBend0 - distToBend1) > 0.5)
+                {
+                    is0Shorter = (distToBend0 < distToBend1);
+                    Console.WriteLine($"Leg comparison by bend distance: End0={distToBend0:F2}, End1={distToBend1:F2} -> End{(is0Shorter ? 0 : 1)} is shorter");
+                }
+                else if (area0 > 0.001 && area1 > 0.001 && Math.Abs(area0 - area1) > 0.5)
+                {
+                    is0Shorter = (area0 < area1);
+                    Console.WriteLine($"Leg comparison by cylinder area: End0={area0:F2}, End1={area1:F2} -> End{(is0Shorter ? 0 : 1)} is shorter");
+                }
+                else
+                {
+                    double[] dir1 = GetCylinderAxisDirection(terminalSides[0].Cylinder);
+                    double[] dir2 = GetCylinderAxisDirection(terminalSides[1].Cylinder);
+                    double[] center1 = terminalSides[0].EdgeCenter;
+                    double[] center2 = terminalSides[1].EdgeCenter;
+                    double dist1 = area0;
+                    double dist2 = area1;
+
+                    if (dir1 != null && dir2 != null && center1 != null && center2 != null)
+                    {
+                        double[] apexMath = CalculateApexPoint(center1, dir1, center2, dir2);
+                        if (apexMath != null)
+                        {
+                            dist1 = Distance(center1, apexMath);
+                            dist2 = Distance(center2, apexMath);
+                        }
+                    }
+                    is0Shorter = (dist1 <= dist2);
+                    Console.WriteLine($"Leg comparison fallback: End0={dist1:F2}, End1={dist2:F2} -> End{(is0Shorter ? 0 : 1)} is shorter");
+                }
+
+                TerminalSide startingSide = is0Shorter ? terminalSides[0] : terminalSides[1];
+                TerminalSide endingSide = is0Shorter ? terminalSides[1] : terminalSides[0];
 
                 Console.WriteLine("Creating PIPE_START_POINT...");
                 IpfcFeature featStart;
@@ -1563,19 +1638,16 @@ namespace ConsoleApp2
                         int t1 = s1.GetSurfaceType();
                         int t2 = s2.GetSurfaceType();
 
-                        // Reject any edge that touches a torus surface (torus plane surface)
-                        if (t1 == (int)EpfcSurfaceType.EpfcSURFACE_TORUS || t2 == (int)EpfcSurfaceType.EpfcSURFACE_TORUS)
-                            continue;
-
-                        if (t1 == (int)EpfcSurfaceType.EpfcSURFACE_PLANE && t2 == (int)EpfcSurfaceType.EpfcSURFACE_CYLINDER)
+                        // An outer cut end MUST have one planar cut surface
+                        if (t1 == (int)EpfcSurfaceType.EpfcSURFACE_PLANE)
                         {
                             planeSurf = s1;
-                            cylSurf = s2;
+                            cylSurf = (t2 == (int)EpfcSurfaceType.EpfcSURFACE_CYLINDER) ? s2 : null;
                         }
-                        else if (t2 == (int)EpfcSurfaceType.EpfcSURFACE_PLANE && t1 == (int)EpfcSurfaceType.EpfcSURFACE_CYLINDER)
+                        else if (t2 == (int)EpfcSurfaceType.EpfcSURFACE_PLANE)
                         {
                             planeSurf = s2;
-                            cylSurf = s1;
+                            cylSurf = (t1 == (int)EpfcSurfaceType.EpfcSURFACE_CYLINDER) ? s1 : null;
                         }
                     }
                 }
