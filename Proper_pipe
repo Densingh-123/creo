@@ -1,0 +1,1608 @@
+using pfcls;
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Threading;
+using System.Windows.Forms;
+
+namespace ConsoleApp2
+{
+    public class Program
+    {
+        public static CCpfcAsyncConnection Asc { get; set; }
+        public static IpfcAsyncConnection Iac { get; set; }
+        public static IpfcBaseSession Session { get; set; }
+        private static IpfcModel WorkingModel;
+        private static IpfcModelItemOwner WorkingItemOwner;
+        private static IpfcModelItemOwner FeatureItemOwner;
+
+        public class CylinderInfo
+        {
+            public IpfcSurface Surface { get; set; }
+            public double[] Origin { get; set; }
+            public double Area { get; set; }
+            public int Index { get; set; }
+        }
+
+        public class TerminalSide
+        {
+            public IpfcSurface Plane { get; set; }
+            public IpfcEdge Edge { get; set; }
+            public IpfcSurface Cylinder { get; set; }
+            public double[] PlaneOrigin { get; set; }
+            public double[] EdgeCenter { get; set; }
+            public double EdgeRadius { get; set; }
+            public int PlaneIndex { get; set; }
+            public int CylinderIndex { get; set; }
+            public double CylinderArea { get; set; }
+            public double PipeDistance { get; set; }
+        }
+        public static void Main()
+        {
+            Connect();
+            if (Session == null)
+            {
+                MessageBox.Show(
+                    "Could not connect to an active Creo session.",
+                    "Connection Error",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+                return;
+            }
+
+            IpfcModel model = Session.CurrentModel;
+            if (model == null)
+            {
+                MessageBox.Show(
+                    "No active model found in Creo. Please open a model first.",
+                    "No Model",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
+                return;
+            }
+
+            // Initialize working model, classify bends, and open in new window if assembly component
+            if (!InitializeWorkingModel(model))
+            {
+                return;
+            }
+
+            CreatePipeTree();
+        }
+
+        private static bool InitializeWorkingModel(IpfcModel model)
+        {
+            try
+            {
+                bool isAssembly = model is IpfcAssembly;
+
+                if (isAssembly)
+                {
+                    List<IpfcModel> allComponents = new List<IpfcModel>();
+                    HashSet<string> visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    CollectAllComponents((IpfcAssembly)model, allComponents, visited);
+
+                    IpfcModel bestPipeModel = null;
+                    double bestSpan = -1.0;
+
+                    for (int i = 0; i < allComponents.Count; i++)
+                    {
+                        IpfcModel comp = allComponents[i];
+                        string name = "";
+                        try { name = comp.InstanceName ?? ""; } catch { }
+
+                        // Skip standard fittings, nuts, ferrules, seals
+                        if (name.IndexOf("NUT", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                            name.IndexOf("FERRULE", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                            name.IndexOf("FTG", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                            name.IndexOf("FITTING", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                            name.IndexOf("SEAL", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                            name.IndexOf("O-RING", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                            name.IndexOf("ORING", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                            name.IndexOf("CLAMP", StringComparison.OrdinalIgnoreCase) >= 0)
+                        {
+                            continue;
+                        }
+
+                        int bends = CountDistinctBends((IpfcModelItemOwner)comp);
+                        List<TerminalSide> ends = FindTerminalSides((IpfcModelItemOwner)comp);
+
+                        if (ends.Count == 2 && bends >= 1)
+                        {
+                            double span = Distance(ends[0].EdgeCenter, ends[1].EdgeCenter);
+
+                            // Priority 1: Explicit TUBE or PIPE in name
+                            if (name.IndexOf("TUBE", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                name.IndexOf("PIPE", StringComparison.OrdinalIgnoreCase) >= 0)
+                            {
+                                bestPipeModel = comp;
+                                break;
+                            }
+
+                            // Priority 2: Part with longest span between terminal ends (tube is much larger than fittings)
+                            if (span > bestSpan)
+                            {
+                                bestSpan = span;
+                                bestPipeModel = comp;
+                            }
+                        }
+                    }
+
+                    if (bestPipeModel != null)
+                    {
+                        if (OpenModelInNewWindow(bestPipeModel))
+                        {
+                            WorkingModel = bestPipeModel;
+                            WorkingItemOwner = (IpfcModelItemOwner)bestPipeModel;
+                            FeatureItemOwner = (IpfcModelItemOwner)bestPipeModel;
+                            return true;
+                        }
+                        else
+                        {
+                            WorkingModel = bestPipeModel;
+                            WorkingItemOwner = (IpfcModelItemOwner)bestPipeModel;
+                            FeatureItemOwner = (IpfcModelItemOwner)model;
+                            return true;
+                        }
+                    }
+
+                    int asmBends = CountDistinctBends((IpfcModelItemOwner)model);
+                    List<TerminalSide> asmEnds = FindTerminalSides((IpfcModelItemOwner)model);
+
+                    if (asmEnds.Count == 2 && asmBends >= 1)
+                    {
+                        WorkingModel = model;
+                        WorkingItemOwner = (IpfcModelItemOwner)model;
+                        FeatureItemOwner = (IpfcModelItemOwner)model;
+                        return true;
+                    }
+
+                    MessageBox.Show(
+                        "No bent pipe found in the active assembly hierarchy.",
+                        "No Pipe Found",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Warning);
+
+                    return false;
+                }
+                else
+                {
+                    // Standalone PART
+                    int partBends = CountDistinctBends((IpfcModelItemOwner)model);
+                    List<TerminalSide> partEnds = FindTerminalSides((IpfcModelItemOwner)model);
+
+                    if (partEnds.Count == 2)
+                    {
+                        if (partBends >= 1)
+                        {
+                            WorkingModel = model;
+                            WorkingItemOwner = (IpfcModelItemOwner)model;
+                            FeatureItemOwner = (IpfcModelItemOwner)model;
+                            return true;
+                        }
+                        else
+                        {
+                            MessageBox.Show(
+                                "The open model is a straight pipe with no bends.\n\n" +
+                                "This automation requires a bent pipe.",
+                                "Straight Pipe Detected",
+                                MessageBoxButtons.OK,
+                                MessageBoxIcon.Warning);
+                            return false;
+                        }
+                    }
+                    else
+                    {
+                        MessageBox.Show(
+                            "The open model is not a recognized pipe geometry (found " + partEnds.Count + " terminal ends).",
+                            "Invalid Model",
+                            MessageBoxButtons.OK,
+                            MessageBoxIcon.Warning);
+                        return false;
+                    }
+                }
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static int CountDistinctBends(IpfcModelItemOwner itemOwner)
+        {
+            try
+            {
+                IpfcModelItems surfaces = itemOwner.ListItems(EpfcModelItemType.EpfcITEM_SURFACE);
+                if (surfaces == null || surfaces.Count < 2) return 0;
+
+                List<double[]> torusCenters = new List<double[]>();
+                const double CENTER_TOLERANCE = 2.0;
+                int totalTorusCount = 0;
+
+                for (int i = 0; i < surfaces.Count; i++)
+                {
+                    try
+                    {
+                        IpfcSurface surf = (IpfcSurface)surfaces[i];
+                        if (surf.GetSurfaceType() == (int)EpfcSurfaceType.EpfcSURFACE_TORUS)
+                        {
+                            totalTorusCount++;
+                            IpfcTransformedSurface trans = surf as IpfcTransformedSurface;
+                            if (trans != null && trans.CoordSys != null)
+                            {
+                                IpfcPoint3D origin = trans.CoordSys.GetOrigin();
+                                if (origin != null)
+                                {
+                                    double[] c = new double[] { origin[0], origin[1], origin[2] };
+                                    bool isDuplicate = false;
+                                    for (int k = 0; k < torusCenters.Count; k++)
+                                    {
+                                        if (Distance(c, torusCenters[k]) < CENTER_TOLERANCE)
+                                        {
+                                            isDuplicate = true;
+                                            break;
+                                        }
+                                    }
+                                    if (!isDuplicate)
+                                    {
+                                        torusCenters.Add(c);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    catch { }
+                }
+
+                if (torusCenters.Count > 0)
+                {
+                    return torusCenters.Count;
+                }
+
+                if (totalTorusCount > 0)
+                {
+                    return Math.Max(1, totalTorusCount / 2);
+                }
+
+                List<double[]> cylinderDirs = new List<double[]>();
+                for (int i = 0; i < surfaces.Count; i++)
+                {
+                    try
+                    {
+                        IpfcSurface surf = (IpfcSurface)surfaces[i];
+                        if (surf.GetSurfaceType() == (int)EpfcSurfaceType.EpfcSURFACE_CYLINDER)
+                        {
+                            double[] dir = GetCylinderAxisDirection(surf);
+                            if (dir != null)
+                            {
+                                bool isDuplicate = false;
+                                for (int k = 0; k < cylinderDirs.Count; k++)
+                                {
+                                    double dot = Math.Abs(dir[0] * cylinderDirs[k][0] + dir[1] * cylinderDirs[k][1] + dir[2] * cylinderDirs[k][2]);
+                                    if (dot > 0.995) // Colinear
+                                    {
+                                        isDuplicate = true;
+                                        break;
+                                    }
+                                }
+                                if (!isDuplicate)
+                                {
+                                    cylinderDirs.Add(dir);
+                                }
+                            }
+                        }
+                    }
+                    catch { }
+                }
+
+                if (cylinderDirs.Count >= 2)
+                {
+                    return cylinderDirs.Count - 1;
+                }
+
+                return 0;
+            }
+            catch
+            {
+                return 0;
+            }
+        }
+
+        private static void CollectAllComponents(IpfcAssembly assembly, List<IpfcModel> collectedModels, HashSet<string> visitedNames)
+        {
+            try
+            {
+                IpfcModelItemOwner asmOwner = (IpfcModelItemOwner)assembly;
+                IpfcModelItems features = asmOwner.ListItems(EpfcModelItemType.EpfcITEM_FEATURE);
+                if (features == null) return;
+
+                for (int i = 0; i < features.Count; i++)
+                {
+                    try
+                    {
+                        IpfcModelItem feat = features[i];
+                        if (feat is IpfcComponentFeat compFeat)
+                        {
+                            IpfcModelDescriptor descr = compFeat.ModelDescr;
+                            if (descr == null) continue;
+
+                            IpfcModel compModel = Session.GetModelFromDescr(descr);
+                            if (compModel == null) continue;
+
+                            string name = compModel.InstanceName;
+                            if (visitedNames.Contains(name)) continue;
+                            visitedNames.Add(name);
+
+                            if (compModel is IpfcAssembly subAsm)
+                            {
+                                CollectAllComponents(subAsm, collectedModels, visitedNames);
+                            }
+                            else if (compModel is IpfcSolid || compModel is IpfcPart)
+                            {
+                                collectedModels.Add(compModel);
+                            }
+                        }
+                    }
+                    catch { }
+                }
+            }
+            catch { }
+        }
+
+        private static bool OpenModelInNewWindow(IpfcModel model)
+        {
+            try
+            {
+                IpfcWindow window = null;
+                try { window = Session.GetModelWindow(model); } catch { }
+
+                if (window == null)
+                {
+                    try { window = Session.CreateModelWindow(model); } catch { }
+                }
+
+                if (window != null)
+                {
+                    window.Activate();
+                    model.Display();
+                    window.Refresh();
+                }
+                else
+                {
+                    model.DisplayInNewWindow();
+                    try
+                    {
+                        window = Session.GetModelWindow(model);
+                        window?.Activate();
+                    }
+                    catch { }
+                }
+
+                Thread.Sleep(350);
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static double[] GetCylinderAxisDirection(IpfcSurface cylSurf)
+        {
+            try
+            {
+                IpfcTransformedSurface transSurf = cylSurf as IpfcTransformedSurface;
+                if (transSurf != null && transSurf.CoordSys != null)
+                {
+                    IpfcVector3D zAxis = transSurf.CoordSys.GetZAxis();
+                    if (zAxis != null)
+                    {
+                        double len = Math.Sqrt(zAxis[0] * zAxis[0] + zAxis[1] * zAxis[1] + zAxis[2] * zAxis[2]);
+                        if (len > 0.0001)
+                        {
+                            return new double[] { zAxis[0] / len, zAxis[1] / len, zAxis[2] / len };
+                        }
+                    }
+                }
+            }
+            catch { }
+            return null;
+        }
+        private static bool IsPipeTargetName(string name)
+        {
+            if (string.IsNullOrEmpty(name)) return false;
+            string upper = name.ToUpperInvariant().Trim();
+
+            if (upper == "PIPE_START_POINT" ||
+                upper == "PIPE_Z_POINT" ||
+                upper == "PIPE_END_POINT" ||
+                upper == "PIPE_AXIS_START" ||
+                upper == "PIPE_AXIS_END" ||
+                upper == "BEND_DATA" ||
+                upper == "PIPE_BOUND_BOX")
+            {
+                return true;
+            }
+
+            if (upper == "A_1" || upper == "A_2" || upper == "A_3" || upper == "A_4" ||
+                upper == "A1" || upper == "A2" || upper == "A3" || upper == "A4")
+            {
+                return true;
+            }
+
+            if (upper.StartsWith("A_") && upper.Length <= 5)
+            {
+                string suffix = upper.Substring(2);
+                if (int.TryParse(suffix, out _))
+                    return true;
+            }
+
+            if (upper.Contains("PIPE_START") ||
+                upper.Contains("PIPE_END") ||
+                upper.Contains("PIPE_Z") ||
+                upper.Contains("PIPE_AXIS") ||
+                upper.Contains("BEND_DATA") ||
+                upper.Contains("BOUND_BOX"))
+            {
+                return true;
+            }
+
+            return false;
+        }
+
+        private static bool CheckAndDeleteExistingItems(IpfcModelItemOwner featureOwner)
+        {
+            List<string> existingItems = new List<string>();
+
+            CollectPipeItems(featureOwner.ListItems(EpfcModelItemType.EpfcITEM_COORD_SYS), "Coord System", existingItems);
+            CollectPipeItems(featureOwner.ListItems(EpfcModelItemType.EpfcITEM_AXIS), "Axis", existingItems);
+            CollectPipeItems(featureOwner.ListItems(EpfcModelItemType.EpfcITEM_POINT), "Point", existingItems);
+
+            if (existingItems.Count == 0)
+            {
+                return true;
+            }
+
+            DialogResult result = MessageBox.Show(
+                "The following existing items were found:\n\n" +
+                string.Join("\n", existingItems) +
+                "\n\nDo you want to DELETE all of them and create new ones?",
+                "Existing Items Found",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Warning);
+
+            if (result == DialogResult.No)
+            {
+                return false;
+            }
+            DeleteAllExistingPipeItemsAllAtOnce(featureOwner);
+            return true;
+        }
+
+        private static void CollectPipeItems(IpfcModelItems items, string prefix, List<string> existingItems)
+        {
+            if (items == null) return;
+            for (int i = 0; i < items.Count; i++)
+            {
+                try
+                {
+                    string name = items[i].GetName();
+                    if (IsPipeTargetName(name))
+                    {
+                        string entry = prefix + ": " + name;
+                        if (!existingItems.Contains(entry))
+                            existingItems.Add(entry);
+                    }
+                }
+                catch { }
+            }
+        }
+
+        private static void DeleteAllExistingPipeItemsAllAtOnce(IpfcModelItemOwner featureOwner)
+        {
+            IpfcSession creoSession = (IpfcSession)Session;
+            IpfcSelectionBuffer buffer = creoSession.CurrentSelectionBuffer;
+            buffer.Clear();
+
+            List<IpfcModelItem> itemsToSelect = new List<IpfcModelItem>();
+            HashSet<int> addedIds = new HashSet<int>();
+
+            EpfcModelItemType[] types = new[]
+            {
+                EpfcModelItemType.EpfcITEM_COORD_SYS,
+                EpfcModelItemType.EpfcITEM_AXIS,
+                EpfcModelItemType.EpfcITEM_POINT,
+                EpfcModelItemType.EpfcITEM_FEATURE
+            };
+
+            foreach (var type in types)
+            {
+                try
+                {
+                    IpfcModelItems items = featureOwner.ListItems(type);
+                    if (items != null)
+                    {
+                        for (int i = 0; i < items.Count; i++)
+                        {
+                            try
+                            {
+                                IpfcModelItem item = items[i];
+                                string name = item.GetName();
+                                if (IsPipeTargetName(name) && !addedIds.Contains(item.Id))
+                                {
+                                    addedIds.Add(item.Id);
+                                    itemsToSelect.Add(item);
+                                }
+                            }
+                            catch { }
+                        }
+                    }
+                }
+                catch { }
+            }
+            foreach (var item in itemsToSelect)
+            {
+                try
+                {
+                    IpfcSelection sel = new CMpfcSelect().CreateModelItemSelection(item, null);
+                    buffer.AddSelection(sel);
+                }
+                catch { }
+            }
+            IpfcSolid solid = featureOwner as IpfcSolid ?? Session.CurrentModel as IpfcSolid;
+            if (solid != null)
+            {
+                try
+                {
+                    CpfcFeatureOperations ops = new CpfcFeatureOperations();
+                    HashSet<int> featOpsIds = new HashSet<int>();
+
+                    foreach (var item in itemsToSelect)
+                    {
+                        try
+                        {
+                            IpfcFeature feat = item as IpfcFeature;
+                            if (feat == null && item is IpfcAxis axis) { feat = axis.GetFeature(); }
+                            if (feat == null && item is IpfcCoordSystem csys) { feat = csys.GetFeature(); }
+
+                            if (feat != null)
+                            {
+                                int featId = ((IpfcModelItem)feat).Id;
+                                if (!featOpsIds.Contains(featId))
+                                {
+                                    featOpsIds.Add(featId);
+                                    IpfcDeleteOperation delOp = feat.CreateDeleteOp();
+                                    delOp.Clip = true;
+                                    delOp.AllowGroupMembers = true;
+                                    delOp.AllowChildGroupMembers = true;
+                                    ops.Append(delOp);
+                                }
+                            }
+                        }
+                        catch { }
+                    }
+
+                    if (ops.Count > 0)
+                    {
+                        solid.ExecuteFeatureOps(ops, null);
+                    }
+                }
+                catch { }
+            }
+            string singleDeleteMacro =
+                "~ Command `ProCmdEditDelete` ;" +
+                "~ Command `ProCmdFeatDelete` ;" +
+                "~ Activate `del_feat_dlg` `OK`;" +
+                "~ Activate `del_feat_dlg` `stdbtn_1`;" +
+                "~ Activate `del_feat_dlg` `delete_btn`;" +
+                "~ Activate `del_feat_dlg` `ok_btn`;" +
+                "~ Activate `del_feat_dlg` `CommitBtn`;" +
+                "~ Activate `Odui_Dlg_01` `stdbtn_1`;" +
+                "~ Activate `Odui_Dlg_00` `stdbtn_1`;" +
+                "~ Activate `main_dlg_cur` `stdbtn_1`;";
+
+            Session.RunMacro(singleDeleteMacro);
+            Thread.Sleep(200);
+
+            buffer.Clear();
+
+            try
+            {
+                solid?.Regenerate(null);
+                Session.get_CurrentWindow().Repaint();
+            }
+            catch { }
+        }
+        private static Dictionary<string, string> FindTreeNodeNames(List<string> itemNames)
+        {
+            var result = new Dictionary<string, string>();
+            var remaining = new List<string>(itemNames);
+
+            IpfcSession creoSession = (IpfcSession)Session;
+            IpfcSelectionBuffer buffer = creoSession.CurrentSelectionBuffer;
+
+            try
+            {
+                Session.RunMacro("~ Command `ProCmdTreeExpandAll`;");
+                Thread.Sleep(150);
+            }
+            catch { }
+
+            int consecutiveMisses = 0;
+            for (int i = 1; i <= 500 && remaining.Count > 0; i++)
+            {
+                string nodeName = "node" + i;
+
+                try
+                {
+                    buffer.Clear();
+
+                    string mapkey = "~ Select `main_dlg_cur` `PHTLeft.AssyTree` 1 `" + nodeName + "`;";
+                    Session.RunMacro(mapkey);
+                    Thread.Sleep(15);
+
+                    IpfcSelections contents = buffer.Contents;
+                    if (contents != null && contents.Count > 0)
+                    {
+                        consecutiveMisses = 0;
+                        IpfcModelItem selItem = contents[0]?.get_SelItem();
+                        if (selItem != null)
+                        {
+                            string foundName = "";
+                            try { foundName = selItem.GetName(); } catch { }
+
+                            for (int j = remaining.Count - 1; j >= 0; j--)
+                            {
+                                string targetName = remaining[j];
+                                bool matched = false;
+
+                                if (!string.IsNullOrEmpty(foundName) && foundName.Equals(targetName, StringComparison.OrdinalIgnoreCase))
+                                {
+                                    matched = true;
+                                }
+                                else if (selItem is IpfcFeature feat)
+                                {
+                                    try
+                                    {
+                                        IpfcModelItem featModelItem = feat as IpfcModelItem;
+                                        if (featModelItem != null && featModelItem.GetName().Equals(targetName, StringComparison.OrdinalIgnoreCase))
+                                        {
+                                            matched = true;
+                                        }
+                                        else
+                                        {
+                                            IpfcModelItems subPoints = feat.ListSubItems(EpfcModelItemType.EpfcITEM_POINT);
+                                            if (subPoints != null)
+                                            {
+                                                for (int k = 0; k < subPoints.Count; k++)
+                                                {
+                                                    if (subPoints[k].GetName().Equals(targetName, StringComparison.OrdinalIgnoreCase))
+                                                    {
+                                                        matched = true;
+                                                        break;
+                                                    }
+                                                }
+                                            }
+
+                                            if (!matched)
+                                            {
+                                                IpfcModelItems subAxes = feat.ListSubItems(EpfcModelItemType.EpfcITEM_AXIS);
+                                                if (subAxes != null)
+                                                {
+                                                    for (int k = 0; k < subAxes.Count; k++)
+                                                    {
+                                                        if (subAxes[k].GetName().Equals(targetName, StringComparison.OrdinalIgnoreCase))
+                                                        {
+                                                            matched = true;
+                                                            break;
+                                                        }
+                                                    }
+                                                }
+                                            }
+
+                                            if (!matched)
+                                            {
+                                                IpfcModelItems subCsys = feat.ListSubItems(EpfcModelItemType.EpfcITEM_COORD_SYS);
+                                                if (subCsys != null)
+                                                {
+                                                    for (int c = 0; c < subCsys.Count; c++)
+                                                    {
+                                                        if (subCsys[c].GetName().Equals(targetName, StringComparison.OrdinalIgnoreCase))
+                                                        {
+                                                            matched = true;
+                                                            break;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    catch { }
+                                }
+
+                                if (matched)
+                                {
+                                    result[targetName] = nodeName;
+                                    remaining.RemoveAt(j);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    else
+                    {
+                        consecutiveMisses++;
+                        if (consecutiveMisses > 50 && i > 60)
+                        {
+                            break;
+                        }
+                    }
+                }
+                catch { }
+            }
+
+            return result;
+        }
+        private static double[] CalculateApexPoint(double[] p1, double[] u1, double[] p2, double[] u2)
+        {
+            try
+            {
+                if (p1 == null || u1 == null || p2 == null || u2 == null) return null;
+                double u1DotU2 = u1[0] * u2[0] + u1[1] * u2[1] + u1[2] * u2[2];
+                double denom = 1.0 - u1DotU2 * u1DotU2;
+                if (Math.Abs(denom) < 0.0001) return null; // Parallel or nearly parallel
+
+                double[] w0 = new double[] { p1[0] - p2[0], p1[1] - p2[1], p1[2] - p2[2] };
+                double d = u1[0] * w0[0] + u1[1] * w0[1] + u1[2] * w0[2];
+                double e = u2[0] * w0[0] + u2[1] * w0[1] + u2[2] * w0[2];
+
+                double s = (u1DotU2 * e - d) / denom;
+                double t = (e - u1DotU2 * d) / denom;
+
+                double q1x = p1[0] + s * u1[0];
+                double q1y = p1[1] + s * u1[1];
+                double q1z = p1[2] + s * u1[2];
+
+                double q2x = p2[0] + t * u2[0];
+                double q2y = p2[1] + t * u2[1];
+                double q2z = p2[2] + t * u2[2];
+
+                return new double[] { 0.5 * (q1x + q2x), 0.5 * (q1y + q2y), 0.5 * (q1z + q2z) };
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        public static void CreatePipeTree()
+        {
+            try
+            {
+                IpfcModelItemOwner itemOwner = WorkingItemOwner;
+                IpfcModelItemOwner featureOwner = FeatureItemOwner;
+
+                IpfcSolid solid = Session.CurrentModel as IpfcSolid;
+                if (!CheckAndDeleteExistingItems(featureOwner))
+                {
+                    return;
+                }
+                List<TerminalSide> terminalSides = FindTerminalSides(itemOwner);
+                if (terminalSides.Count < 2)
+                {
+                    return;
+                }
+                EnsureCylindersForTerminalSides(itemOwner, terminalSides);
+
+                if (terminalSides[0].Cylinder == null || terminalSides[1].Cylinder == null)
+                {
+                    return;
+                }
+
+                // Calculate distance to bend apex to determine the shortest pipe leg
+                double[] dir1 = GetCylinderAxisDirection(terminalSides[0].Cylinder);
+                double[] dir2 = GetCylinderAxisDirection(terminalSides[1].Cylinder);
+                double[] center1 = terminalSides[0].EdgeCenter;
+                double[] center2 = terminalSides[1].EdgeCenter;
+
+                double dist1 = terminalSides[0].CylinderArea;
+                double dist2 = terminalSides[1].CylinderArea;
+
+                if (dir1 != null && dir2 != null && center1 != null && center2 != null)
+                {
+                    double[] apexMath = CalculateApexPoint(center1, dir1, center2, dir2);
+                    if (apexMath != null)
+                    {
+                        dist1 = Distance(center1, apexMath);
+                        dist2 = Distance(center2, apexMath);
+                    }
+                }
+
+                // startingSide is strictly the SHORTEST pipe leg end
+                TerminalSide startingSide = (dist1 <= dist2) ? terminalSides[0] : terminalSides[1];
+                TerminalSide endingSide = (dist1 <= dist2) ? terminalSides[1] : terminalSides[0];
+
+                // Create PIPE_START_POINT on the inner arc of the SHORTER leg planar end surface
+                IpfcModelItem startPoint = CreateDatumPointAtEdgeCenter(featureOwner, startingSide.Edge, "PIPE_START_POINT");
+                if (startPoint == null)
+                {
+                    return;
+                }
+                SetModelItemName(startPoint, "PIPE_START_POINT");
+
+                // Create Axis A_1 on the shorter leg cylinder
+                IpfcModelItem axis1 = CreateAxisFromCylinder(featureOwner, startingSide.Cylinder, "A_1");
+                if (axis1 != null)
+                {
+                    SetModelItemName(axis1, "A_1");
+                }
+                else
+                {
+                    return;
+                }
+
+                // Create Axis A_2 on the longer leg cylinder
+                IpfcModelItem axis2 = CreateAxisFromCylinder(featureOwner, endingSide.Cylinder, "A_2");
+                if (axis2 != null)
+                {
+                    SetModelItemName(axis2, "A_2");
+                }
+                else
+                {
+                    return;
+                }
+
+                // Create Midpoint/Apex PIPE_Z_POINT
+                IpfcModelItem midpoint = null;
+                try
+                {
+                    IpfcSession sessionContext = (IpfcSession)Session;
+                    IpfcSelectionBuffer axisBuffer = sessionContext.CurrentSelectionBuffer;
+                    axisBuffer.Clear();
+
+                    IpfcSelection axisSelection1 = new CMpfcSelect().CreateModelItemSelection(axis1, null);
+                    IpfcSelection axisSelection2 = new CMpfcSelect().CreateModelItemSelection(axis2, null);
+                    axisBuffer.AddSelection(axisSelection1);
+                    axisBuffer.AddSelection(axisSelection2);
+
+                    int pointCountBeforeMid = featureOwner.ListItems(EpfcModelItemType.EpfcITEM_POINT)?.Count ?? 0;
+                    int featCountBeforeMid = featureOwner.ListItems(EpfcModelItemType.EpfcITEM_FEATURE)?.Count ?? 0;
+
+                    string midpointMacro =
+                        "~ Command `ProCmdDatumPointGeneral` ;" +
+                        "~ Activate `Odui_Dlg_01` `stdbtn_1`;" +
+                        "~ Activate `Odui_Dlg_00` `stdbtn_1`;";
+                    Session.RunMacro(midpointMacro);
+                    Thread.Sleep(350);
+
+                    IpfcModelItems pointsAfterMidpoint = featureOwner.ListItems(EpfcModelItemType.EpfcITEM_POINT);
+                    if (pointsAfterMidpoint != null && pointsAfterMidpoint.Count > pointCountBeforeMid)
+                    {
+                        midpoint = pointsAfterMidpoint[pointsAfterMidpoint.Count - 1];
+                        SetModelItemName(midpoint, "PIPE_Z_POINT");
+
+                        IpfcModelItems featsAfterMid = featureOwner.ListItems(EpfcModelItemType.EpfcITEM_FEATURE);
+                        if (featsAfterMid != null && featsAfterMid.Count > featCountBeforeMid)
+                        {
+                            try { ((IpfcModelItem)featsAfterMid[featsAfterMid.Count - 1])?.SetName("PIPE_Z_POINT"); } catch { }
+                        }
+                    }
+                    axisBuffer.Clear();
+                }
+                catch { }
+
+                // Create PIPE_END_POINT on the inner arc of the LONGER leg planar end surface
+                IpfcModelItem endPoint = CreateDatumPointAtEdgeCenter(featureOwner, endingSide.Edge, "PIPE_END_POINT");
+                if (endPoint == null)
+                {
+                    return;
+                }
+                SetModelItemName(endPoint, "PIPE_END_POINT");
+
+                solid?.Regenerate(null);
+                Session.get_CurrentWindow().Repaint();
+
+                List<string> namesToFind = new List<string>
+                {
+                    "PIPE_START_POINT",
+                    "PIPE_Z_POINT",
+                    "PIPE_END_POINT"
+                };
+
+                Dictionary<string, string> nodeNames = FindTreeNodeNames(namesToFind);
+
+                if (!nodeNames.TryGetValue("PIPE_START_POINT", out string shorterNode) ||
+                    !nodeNames.TryGetValue("PIPE_Z_POINT", out string zRefNode) ||
+                    !nodeNames.TryGetValue("PIPE_END_POINT", out string longerNode))
+                {
+                    return;
+                }
+
+                double[] shorterCoords = GetPointCoordinates(startPoint);
+                double[] refTargetCoords = midpoint != null ? GetPointCoordinates(midpoint) : GetPointCoordinates(endPoint);
+
+                // Create BEND_DATA CSYS using start point, Z_point, and end point as references
+                IpfcModelItem coordinate1 = CreateCoordinateSystem(
+                    featureOwner,
+                    shorterNode,
+                    zRefNode,
+                    longerNode,
+                    "Axis_Y",
+                    "BEND_DATA");
+
+                if (coordinate1 != null)
+                {
+                    solid?.Regenerate(null);
+                    Session.get_CurrentWindow().Repaint();
+
+                    bool isOutward1 = IsYAxisPointingOutward(coordinate1, shorterCoords, refTargetCoords);
+                    if (!isOutward1)
+                    {
+                        FlipCoordinateSystemY(coordinate1);
+                        solid?.Regenerate(null);
+                        Session.get_CurrentWindow().Repaint();
+                    }
+
+                    DialogResult result = MessageBox.Show(
+                        "COORDINATE_1 (BEND_DATA):\nThe Y axis is currently pointing OUTWARDS (outside).\n\nDo you want to switch the axis to point INWARDS (inside)?",
+                        "BEND_DATA - Y Axis Direction",
+                        MessageBoxButtons.YesNo,
+                        MessageBoxIcon.Question);
+
+                    if (result == DialogResult.Yes)
+                    {
+                        FlipCoordinateSystemY(coordinate1);
+                        solid?.Regenerate(null);
+                        Session.get_CurrentWindow().Repaint();
+                    }
+                }
+
+                // Create PIPE_BOUND_BOX CSYS using start point, Z_point, and end point as references
+                IpfcModelItem coordinate2 = CreateCoordinateSystem(
+                    featureOwner,
+                    shorterNode,
+                    zRefNode,
+                    longerNode,
+                    "Axis_Y",
+                    "PIPE_BOUND_BOX");
+
+                if (coordinate2 != null)
+                {
+                    solid?.Regenerate(null);
+                    Session.get_CurrentWindow().Repaint();
+                    bool isOutward2 = IsYAxisPointingOutward(coordinate2, shorterCoords, refTargetCoords);
+                    if (isOutward2)
+                    {
+                        FlipCoordinateSystemY(coordinate2);
+                        solid?.Regenerate(null);
+                        Session.get_CurrentWindow().Repaint();
+                    }
+                }
+            }
+            catch
+            {
+            }
+        }
+
+        private static IpfcModelItem CreateCoordinateSystem(
+            IpfcModelItemOwner itemOwner,
+            string originNode,
+            string ref1Node,
+            string ref2Node,
+            string axis1Name,
+            string coordinateName)
+        {
+            try
+            {
+                IpfcModelItems before = itemOwner.ListItems(EpfcModelItemType.EpfcITEM_COORD_SYS);
+                int countBefore = before?.Count ?? 0;
+
+                string coordinateMapkey =
+                    "~ Activate `main_dlg_cur` `page_Model_control_btn` 1;" +
+                    "~ Command `ProCmdDatumCsys` ;" +
+                    "~ Move `Odui_Dlg_00` `Odui_Dlg_00` 2 21.718098 9.224354;" +
+                    "~ Trigger `Odui_Dlg_00` `t1.OriginPlacement` 2 `DuMmY` `constr`;" +
+                    "~ Focus `Odui_Dlg_00` `t1.OriginPlacement`;" +
+                    "~ FocusIn `Odui_Dlg_00` `t1.OriginPlacement`;" +
+                    "~ Select `Odui_Dlg_00` `t1.OriginPlacement` 2 `DuMmY` `constr`;" +
+                    "~ Timer `UI Desktop` `UI Desktop` `CollectorWdg_FocusTimer`;" +
+                    "~ Trigger `Odui_Dlg_00` `t1.OriginPlacement` 2 `` ``;" +
+                    "~ FocusOut `Odui_Dlg_00` `t1.OriginPlacement`;" +
+                    "~ Select `main_dlg_cur` `PHTLeft.AssyTree` 1 `" + originNode + "`;" +
+                    "~ Trigger `Odui_Dlg_00` `t1.OriginPlacement` 2 `0` `constr`;" +
+                    "~ Trigger `Odui_Dlg_00` `t1.OriginPlacement` 2 `` ``;" +
+                    "~ Select `Odui_Dlg_00` `pg_vis_tab` 1 `tab_2`;" +
+                    "~ Trigger `Odui_Dlg_00` `t2.DirectionTable1` 2 `DuMmY` `ref`;" +
+                    "~ Focus `Odui_Dlg_00` `t2.DirectionTable1`;" +
+                    "~ FocusIn `Odui_Dlg_00` `t2.DirectionTable1`;" +
+                    "~ Select `Odui_Dlg_00` `t2.DirectionTable1` 2 `DuMmY` `ref`;" +
+                    "~ Trigger `Odui_Dlg_00` `t2.DirectionTable1` 2 `` ``;" +
+                    "~ Timer `UI Desktop` `UI Desktop` `CollectorWdg_FocusTimer`;" +
+                    "~ FocusOut `Odui_Dlg_00` `t2.DirectionTable1`;" +
+                    "~ Select `main_dlg_cur` `PHTLeft.AssyTree` 1 `" + ref1Node + "`;" +
+                    "~ Trigger `Odui_Dlg_00` `t2.DirectionTable2` 2 `DuMmY` `ref2`;" +
+                    "~ Trigger `Odui_Dlg_00` `t2.DirectionTable2` 2 `` ``;" +
+                    "~ Trigger `Odui_Dlg_00` `t2.DirectionTable2` 2 `DuMmY` `ref2`;" +
+                    "~ Focus `Odui_Dlg_00` `t2.DirectionTable2`;" +
+                    "~ FocusIn `Odui_Dlg_00` `t2.DirectionTable2`;" +
+                    "~ Select `Odui_Dlg_00` `t2.DirectionTable2` 2 `DuMmY` `ref2`;" +
+                    "~ Trigger `Odui_Dlg_00` `t2.DirectionTable2` 2 `` ``;" +
+                    "~ Timer `UI Desktop` `UI Desktop` `CollectorWdg_FocusTimer`;" +
+                    "~ FocusOut `Odui_Dlg_00` `t2.DirectionTable2`;" +
+                    "~ Select `main_dlg_cur` `PHTLeft.AssyTree` 1 `" + ref2Node + "`;" +
+                    "~ Trigger `Odui_Dlg_00` `t2.DirectionTable1` 2 `0` `ref`;" +
+                    "~ Trigger `Odui_Dlg_00` `t2.DirectionTable1` 2 `` ``;" +
+                    "~ Open `Odui_Dlg_00` `t2.AxisMenu1`;~ Close `Odui_Dlg_00` `t2.AxisMenu1`;" +
+                    "~ Select `Odui_Dlg_00` `t2.AxisMenu1` 1 `" + axis1Name + "`;" +
+                    "~ Select `Odui_Dlg_00` `pg_vis_tab` 1 `tab_3`;" +
+                    "~ Update `Odui_Dlg_00` `t3.datum_csys_name` `" + coordinateName + "`;" +
+                    "~ FocusOut `Odui_Dlg_00` `t3.datum_csys_name`;" +
+                    "~ Activate `Odui_Dlg_00` `stdbtn_1`;";
+
+                Session.RunMacro(coordinateMapkey);
+                Thread.Sleep(400);
+
+                IpfcModelItems after = itemOwner.ListItems(EpfcModelItemType.EpfcITEM_COORD_SYS);
+                if (after == null || after.Count <= countBefore)
+                {
+                    return null;
+                }
+
+                IpfcModelItem coordinateSystem = after[after.Count - 1];
+                SetModelItemName(coordinateSystem, coordinateName);
+                return coordinateSystem;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private const string FLIP_Y_MAPKEY =
+            "~ Command `ProCmdFeatRedefine` ;" +
+            "~ Command `ProCmdRedefine@PopupMenuTree` ;" +
+            "~ Trigger `Odui_Dlg_00` `t1.OriginPlacement` 2 `0` `constr`;" +
+            "~ Trigger `Odui_Dlg_00` `t1.OriginPlacement` 2 `` ``;" +
+            "~ Select `Odui_Dlg_00` `pg_vis_tab` 1 `tab_2`;" +
+            "~ Trigger `Odui_Dlg_00` `t2.DirectionTable1` 2 `0` `ref`;" +
+            "~ Trigger `Odui_Dlg_00` `t2.DirectionTable1` 2 `` ``;" +
+            "~ Open `Odui_Dlg_00` `t2.AxisMenu1`;" +
+            "~ Close `Odui_Dlg_00` `t2.AxisMenu1`;" +
+            "~ Select `Odui_Dlg_00` `t2.AxisMenu1` 1 `Axis_Y`;" +
+            "~ Trigger `Odui_Dlg_00` `t2.DirectionTable2` 2 `0` `ref2`;" +
+            "~ Trigger `Odui_Dlg_00` `t2.DirectionTable2` 2 `` ``;" +
+            "~ Activate `Odui_Dlg_00` `t2.FlipBtn1`;" +
+            "~ Activate `Odui_Dlg_00` `stdbtn_1`;";
+
+        private static bool FlipCoordinateSystemY(IpfcModelItem coordinateSystemItem)
+        {
+            try
+            {
+                if (coordinateSystemItem == null) return false;
+
+                IpfcSession creoSession = (IpfcSession)Session;
+                IpfcSelectionBuffer buffer = creoSession.CurrentSelectionBuffer;
+                buffer.Clear();
+
+                IpfcSelection csysSelection = new CMpfcSelect()
+                    .CreateModelItemSelection(coordinateSystemItem, null);
+                buffer.AddSelection(csysSelection);
+
+                Session.RunMacro(FLIP_Y_MAPKEY);
+                Thread.Sleep(350);
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static bool IsYAxisPointingOutward(
+            IpfcModelItem csysItem,
+            double[] pOrigin,
+            double[] pApex)
+        {
+            try
+            {
+                if (csysItem == null || pOrigin == null || pApex == null) return false;
+
+                IpfcCoordSystem csys = csysItem as IpfcCoordSystem;
+                if (csys == null) return false;
+
+                IpfcTransform3D transform = csys.CoordSys;
+                if (transform == null) return false;
+
+                IpfcVector3D yAxis = transform.GetYAxis();
+                if (yAxis == null) return false;
+
+                double[] outward = new double[]
+                {
+                    pOrigin[0] - pApex[0],
+                    pOrigin[1] - pApex[1],
+                    pOrigin[2] - pApex[2]
+                };
+
+                double outLen = Math.Sqrt(outward[0] * outward[0] + outward[1] * outward[1] + outward[2] * outward[2]);
+                double yLen = Math.Sqrt(yAxis[0] * yAxis[0] + yAxis[1] * yAxis[1] + yAxis[2] * yAxis[2]);
+
+                if (outLen < 0.0001 || yLen < 0.0001) return false;
+
+                double dot = (yAxis[0] * outward[0] + yAxis[1] * outward[1] + yAxis[2] * outward[2]) / (outLen * yLen);
+                return dot > 0.0;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static double[] GetPointCoordinates(IpfcModelItem pointItem)
+        {
+            try
+            {
+                if (pointItem is IpfcPoint pt)
+                {
+                    CpfcPoint3D p = (CpfcPoint3D)pt.Point;
+                    if (p != null)
+                    {
+                        return new double[] { p[0], p[1], p[2] };
+                    }
+                }
+
+                IpfcSelection sel = new CMpfcSelect().CreateModelItemSelection(pointItem, null);
+                if (sel != null && sel.Point != null)
+                {
+                    return new double[] { sel.Point[0], sel.Point[1], sel.Point[2] };
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        private static void SetModelItemName(IpfcModelItem modelItem, string name)
+        {
+            try
+            {
+                if (modelItem == null) return;
+                modelItem.SetName(name);
+
+                if (modelItem is IpfcAxis axis)
+                {
+                    try { ((IpfcModelItem)axis.GetFeature())?.SetName(name); } catch { }
+                }
+                else if (modelItem is IpfcCoordSystem csys)
+                {
+                    try { ((IpfcModelItem)csys.GetFeature())?.SetName(name); } catch { }
+                }
+            }
+            catch { }
+        }
+
+        private static bool TryGetCircularEdgeInfo(IpfcEdge edge, out double[] center, out double radius)
+        {
+            center = null;
+            radius = 0.0;
+            try
+            {
+                IpfcGeomCurve geomCurve = edge as IpfcGeomCurve;
+                if (geomCurve == null) return false;
+
+                IpfcCurveDescriptor desc = geomCurve.GetCurveDescriptor();
+                if (desc == null) return false;
+
+                int curveType = (int)desc.GetCurveType();
+
+                if (curveType == (int)EpfcCurveType.EpfcCURVE_ARC)
+                {
+                    IpfcArcDescriptor arcDesc = (IpfcArcDescriptor)desc;
+                    CpfcPoint3D arcCenter = (CpfcPoint3D)arcDesc.Center;
+                    if (arcCenter != null)
+                    {
+                        center = new double[] { arcCenter[0], arcCenter[1], arcCenter[2] };
+                        radius = arcDesc.Radius;
+                        return radius > 0.001;
+                    }
+                }
+                else if (curveType == (int)EpfcCurveType.EpfcCURVE_CIRCLE)
+                {
+                    IpfcCircleDescriptor circleDesc = (IpfcCircleDescriptor)desc;
+                    CpfcPoint3D circleCenter = (CpfcPoint3D)circleDesc.Center;
+                    if (circleCenter != null)
+                    {
+                        center = new double[] { circleCenter[0], circleCenter[1], circleCenter[2] };
+                        radius = circleDesc.Radius;
+                        return radius > 0.001;
+                    }
+                }
+            }
+            catch { }
+            return false;
+        }
+
+        private static List<TerminalSide> FindTerminalSides(IpfcModelItemOwner itemOwner)
+        {
+            List<TerminalSide> allCandidates = new List<TerminalSide>();
+
+            IpfcModelItems edgeItems = itemOwner.ListItems(EpfcModelItemType.EpfcITEM_EDGE);
+            if (edgeItems == null || edgeItems.Count == 0)
+                return allCandidates;
+
+            // Collect all circular edges that strictly lie on a planar end face
+            for (int e = 0; e < edgeItems.Count; e++)
+            {
+                IpfcEdge edge = (IpfcEdge)edgeItems[e];
+                if (!TryGetCircularEdgeInfo(edge, out double[] center, out double radius))
+                    continue;
+
+                IpfcSurface planeSurf = null;
+                IpfcSurface cylSurf = null;
+
+                try
+                {
+                    IpfcSurface s1 = edge.Surface1;
+                    IpfcSurface s2 = edge.Surface2;
+
+                    if (s1 != null && s2 != null)
+                    {
+                        int t1 = s1.GetSurfaceType();
+                        int t2 = s2.GetSurfaceType();
+
+                        // Reject any edge that touches a torus surface (torus plane surface)
+                        if (t1 == (int)EpfcSurfaceType.EpfcSURFACE_TORUS || t2 == (int)EpfcSurfaceType.EpfcSURFACE_TORUS)
+                            continue;
+
+                        if (t1 == (int)EpfcSurfaceType.EpfcSURFACE_PLANE && t2 == (int)EpfcSurfaceType.EpfcSURFACE_CYLINDER)
+                        {
+                            planeSurf = s1;
+                            cylSurf = s2;
+                        }
+                        else if (t2 == (int)EpfcSurfaceType.EpfcSURFACE_PLANE && t1 == (int)EpfcSurfaceType.EpfcSURFACE_CYLINDER)
+                        {
+                            planeSurf = s2;
+                            cylSurf = s1;
+                        }
+                    }
+                }
+                catch { }
+
+                // Only accept circular edges that strictly belong to a planar cut end
+                if (planeSurf != null)
+                {
+                    double cylArea = 0.0;
+                    if (cylSurf != null)
+                    {
+                        try { cylArea = cylSurf.EvalArea(); } catch { }
+                    }
+
+                    allCandidates.Add(new TerminalSide
+                    {
+                        Plane = planeSurf,
+                        Edge = edge,
+                        Cylinder = cylSurf,
+                        EdgeCenter = center,
+                        EdgeRadius = radius,
+                        PlaneOrigin = center,
+                        CylinderArea = cylArea,
+                        PlaneIndex = allCandidates.Count
+                    });
+                }
+            }
+
+            // Cluster concentric circular edges at each planar end face and select the INNER ARC (smaller radius)
+            List<TerminalSide> distinctEnds = new List<TerminalSide>();
+            const double CLUSTER_TOLERANCE = 1.0;
+
+            foreach (var cand in allCandidates)
+            {
+                bool merged = false;
+                for (int i = 0; i < distinctEnds.Count; i++)
+                {
+                    if (Distance(cand.EdgeCenter, distinctEnds[i].EdgeCenter) < CLUSTER_TOLERANCE)
+                    {
+                        // Always select the INNER ARC (smaller radius edge)
+                        if (cand.EdgeRadius < distinctEnds[i].EdgeRadius && cand.EdgeRadius > 0.001)
+                        {
+                            distinctEnds[i].Edge = cand.Edge;
+                            distinctEnds[i].EdgeRadius = cand.EdgeRadius;
+                            distinctEnds[i].EdgeCenter = cand.EdgeCenter;
+                            distinctEnds[i].PlaneOrigin = cand.EdgeCenter;
+                        }
+                        if (distinctEnds[i].Cylinder == null && cand.Cylinder != null)
+                        {
+                            distinctEnds[i].Cylinder = cand.Cylinder;
+                            distinctEnds[i].CylinderArea = cand.CylinderArea;
+                        }
+                        merged = true;
+                        break;
+                    }
+                }
+
+                if (!merged)
+                {
+                    distinctEnds.Add(cand);
+                }
+            }
+
+            if (distinctEnds.Count <= 2)
+                return distinctEnds;
+
+            // If more than 2 candidates, pick the two furthest apart
+            TerminalSide bestSide1 = null;
+            TerminalSide bestSide2 = null;
+            double largestDistance = -1.0;
+
+            for (int i = 0; i < distinctEnds.Count; i++)
+            {
+                for (int j = i + 1; j < distinctEnds.Count; j++)
+                {
+                    double dist = Distance(distinctEnds[i].EdgeCenter, distinctEnds[j].EdgeCenter);
+                    if (dist > largestDistance)
+                    {
+                        largestDistance = dist;
+                        bestSide1 = distinctEnds[i];
+                        bestSide2 = distinctEnds[j];
+                    }
+                }
+            }
+
+            List<TerminalSide> result = new List<TerminalSide>();
+            if (bestSide1 != null) result.Add(bestSide1);
+            if (bestSide2 != null) result.Add(bestSide2);
+            return result;
+        }
+
+        private static void EnsureCylindersForTerminalSides(
+            IpfcModelItemOwner itemOwner,
+            List<TerminalSide> terminalSides)
+        {
+            if (terminalSides.Count < 2) return;
+
+            IpfcModelItems surfaceItems = itemOwner.ListItems(EpfcModelItemType.EpfcITEM_SURFACE);
+            if (surfaceItems == null) return;
+
+            List<CylinderInfo> cylinders = new List<CylinderInfo>();
+            for (int i = 0; i < surfaceItems.Count; i++)
+            {
+                IpfcSurface surf = (IpfcSurface)surfaceItems[i];
+                if (surf.GetSurfaceType() == (int)EpfcSurfaceType.EpfcSURFACE_CYLINDER)
+                {
+                    double area = 0.0;
+                    try { area = surf.EvalArea(); } catch { }
+
+                    cylinders.Add(new CylinderInfo
+                    {
+                        Surface = surf,
+                        Area = area,
+                        Index = cylinders.Count
+                    });
+                }
+            }
+
+            for (int s = 0; s < terminalSides.Count; s++)
+            {
+                if (terminalSides[s].Cylinder == null && cylinders.Count > 0)
+                {
+                    CylinderInfo bestCyl = null;
+                    double minDistance = double.MaxValue;
+
+                    for (int c = 0; c < cylinders.Count; c++)
+                    {
+                        double dist = GetSafeEdgeToSurfaceDistance(terminalSides[s].Edge, cylinders[c].Surface);
+                        if (dist < minDistance || (Math.Abs(dist - minDistance) < 0.1 && cylinders[c].Area > (bestCyl?.Area ?? 0)))
+                        {
+                            minDistance = dist;
+                            bestCyl = cylinders[c];
+                        }
+                    }
+
+                    if (bestCyl != null)
+                    {
+                        terminalSides[s].Cylinder = bestCyl.Surface;
+                        terminalSides[s].CylinderArea = bestCyl.Area;
+                    }
+                }
+                else if (terminalSides[s].Cylinder != null && terminalSides[s].CylinderArea <= 0.001)
+                {
+                    try { terminalSides[s].CylinderArea = terminalSides[s].Cylinder.EvalArea(); } catch { }
+                }
+            }
+        }
+
+        private static double GetSafeEdgeToSurfaceDistance(IpfcEdge edge, IpfcSurface surf)
+        {
+            try
+            {
+                return GetSelectionDistance((IpfcModelItem)edge, (IpfcModelItem)surf);
+            }
+            catch
+            {
+                return double.MaxValue;
+            }
+        }
+
+
+        private static IpfcModelItem CreateDatumPointAtEdgeCenter(
+            IpfcModelItemOwner itemOwner,
+            IpfcEdge edge,
+            string pointName)
+        {
+            try
+            {
+                IpfcSession creoSession = (IpfcSession)Session;
+                IpfcSelectionBuffer selectionBuffer = creoSession.CurrentSelectionBuffer;
+                selectionBuffer.Clear();
+
+                IpfcSelection edgeSelection = new CMpfcSelect()
+                    .CreateModelItemSelection((IpfcModelItem)edge, null);
+                selectionBuffer.AddSelection(edgeSelection);
+
+                IpfcModelItems pointsBefore = itemOwner.ListItems(EpfcModelItemType.EpfcITEM_POINT);
+                int pointCountBefore = pointsBefore?.Count ?? 0;
+
+                IpfcModelItems featsBefore = itemOwner.ListItems(EpfcModelItemType.EpfcITEM_FEATURE);
+                int featCountBefore = featsBefore?.Count ?? 0;
+
+                string pointMacro =
+                    "~ Command `ProCmdDatumPointGeneral` ;" +
+                    "~ Trigger `Odui_Dlg_00` `t1.RefsTable` 2 `0` `c2`;" +
+                    "~ Focus `Odui_Dlg_00` `t1.RefsTable`;" +
+                    "~ FocusIn `Odui_Dlg_00` `t1.RefsTable`;" +
+                    "~ Select `Odui_Dlg_00` `t1.RefsTable` 2 `0` `c2`;" +
+                    "~ FocusOut `Odui_Dlg_00` `t1.RefsTable`;" +
+                    "~ Open `Odui_Dlg_00` `ConstrTypeOptionMenu_OPTMENU1`;" +
+                    "~ Trigger `Odui_Dlg_00` `t1.RefsTable` 2 `` ``;" +
+                    "~ Timer `` `` `CollectorWdg_FocusTimer`;" +
+                    "~ Close `Odui_Dlg_00` `ConstrTypeOptionMenu_OPTMENU1`;" +
+                    "~ Select `Odui_Dlg_00` `ConstrTypeOptionMenu_OPTMENU1` 1 `DTMPNT_CONSTR_TYPE_CENTER`;" +
+                    "~ FocusOut `Odui_Dlg_00` `t1.RefsTable`;" +
+                    "~ Activate `Odui_Dlg_00` `stdbtn_1`;";
+
+                Session.RunMacro(pointMacro);
+                Thread.Sleep(300);
+
+                IpfcModelItems pointsAfter = itemOwner.ListItems(EpfcModelItemType.EpfcITEM_POINT);
+                if (pointsAfter == null || pointsAfter.Count <= pointCountBefore)
+                {
+                    return null;
+                }
+
+                IpfcModelItems featsAfter = itemOwner.ListItems(EpfcModelItemType.EpfcITEM_FEATURE);
+                if (featsAfter != null && featsAfter.Count > featCountBefore && !string.IsNullOrEmpty(pointName))
+                {
+                    try { ((IpfcModelItem)featsAfter[featsAfter.Count - 1])?.SetName(pointName); } catch { }
+                }
+
+                return pointsAfter[pointsAfter.Count - 1];
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private static IpfcModelItem CreateAxisFromCylinder(
+            IpfcModelItemOwner itemOwner,
+            IpfcSurface cylinderSurface,
+            string axisName)
+        {
+            try
+            {
+                IpfcSession creoSession = (IpfcSession)Session;
+                IpfcSelectionBuffer selectionBuffer = creoSession.CurrentSelectionBuffer;
+                selectionBuffer.Clear();
+
+                IpfcSelection cylinderSelection = new CMpfcSelect()
+                    .CreateModelItemSelection((IpfcModelItem)cylinderSurface, null);
+                selectionBuffer.AddSelection(cylinderSelection);
+
+                IpfcModelItems axesBefore = itemOwner.ListItems(EpfcModelItemType.EpfcITEM_AXIS);
+                int countBefore = axesBefore?.Count ?? 0;
+
+                IpfcModelItems featsBefore = itemOwner.ListItems(EpfcModelItemType.EpfcITEM_FEATURE);
+                int featCountBefore = featsBefore?.Count ?? 0;
+
+                Session.RunMacro(
+                    "~ Command `ProCmdDatumAxis` ;" +
+                    "~ Activate `Odui_Dlg_01` `stdbtn_1`;" +
+                    "~ Activate `Odui_Dlg_00` `stdbtn_1`;");
+
+                Thread.Sleep(300);
+
+                IpfcModelItems axesAfter = itemOwner.ListItems(EpfcModelItemType.EpfcITEM_AXIS);
+                if (axesAfter == null || axesAfter.Count <= countBefore)
+                {
+                    return null;
+                }
+
+                IpfcModelItems featsAfter = itemOwner.ListItems(EpfcModelItemType.EpfcITEM_FEATURE);
+                if (featsAfter != null && featsAfter.Count > featCountBefore && !string.IsNullOrEmpty(axisName))
+                {
+                    try { ((IpfcModelItem)featsAfter[featsAfter.Count - 1])?.SetName(axisName); } catch { }
+                }
+
+                return axesAfter[axesAfter.Count - 1];
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private static double GetSelectionDistance(IpfcModelItem item1, IpfcModelItem item2)
+        {
+            try
+            {
+                IpfcSelection selection1 = new CMpfcSelect().CreateModelItemSelection(item1, null);
+                IpfcSelection selection2 = new CMpfcSelect().CreateModelItemSelection(item2, null);
+                IpfcSelectionPair pair = (IpfcSelectionPair)new CCpfcSelectionPair().Create(selection1, selection2);
+                IpfcSelectionEvaluator evaluator = new CMpfcInterference().CreateSelectionEvaluator(pair);
+                double distance = evaluator.ComputeNearestCriticalDistance().Distance;
+                if (double.IsNaN(distance) || double.IsInfinity(distance))
+                {
+                    return 0.0;
+                }
+
+                return Math.Abs(distance);
+            }
+            catch
+            {
+                return 0.0;
+            }
+        }
+
+        private static double Distance(double[] point1, double[] point2)
+        {
+            return Distance(point1[0], point1[1], point1[2], point2[0], point2[1], point2[2]);
+        }
+
+        private static double Distance(double x1, double y1, double z1, double x2, double y2, double z2)
+        {
+            return Math.Sqrt(
+                Math.Pow(x1 - x2, 2.0) +
+                Math.Pow(y1 - y2, 2.0) +
+                Math.Pow(z1 - z2, 2.0));
+        }
+
+        public static void Connect()
+        {
+            try
+            {
+                Asc = new CCpfcAsyncConnection();
+                Iac = Asc.Connect(null, null, null, null);
+                Session = (IpfcBaseSession)Iac.Session;
+            }
+            catch
+            {
+                KillProcess("pfclscom");
+                ConnectSecondTime();
+            }
+        }
+
+        private static void ConnectSecondTime()
+        {
+            try
+            {
+                Asc = new CCpfcAsyncConnection();
+                Iac = Asc.Connect(null, null, null, null);
+                Session = (IpfcBaseSession)Iac.Session;
+            }
+            catch
+            {
+            }
+        }
+
+        private static void KillProcess(string processName)
+        {
+            try
+            {
+                Process[] processes = Process.GetProcessesByName(processName);
+                foreach (Process process in processes)
+                {
+                    process.Kill();
+                }
+            }
+            catch { }
+        }
+    }
+}
