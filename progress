@@ -1618,7 +1618,7 @@ namespace ConsoleApp2
             if (edgeItems == null || edgeItems.Count == 0)
                 return allCandidates;
 
-            // Collect all circular edges that strictly lie on a planar end face
+            // Collect circular edges that strictly lie at the intersection of a planar cut face and a cylinder
             for (int e = 0; e < edgeItems.Count; e++)
             {
                 IpfcEdge edge = (IpfcEdge)edgeItems[e];
@@ -1638,29 +1638,28 @@ namespace ConsoleApp2
                         int t1 = s1.GetSurfaceType();
                         int t2 = s2.GetSurfaceType();
 
-                        // An outer cut end MUST have one planar cut surface
-                        if (t1 == (int)EpfcSurfaceType.EpfcSURFACE_PLANE)
+                        // An outer cut end is strictly between a PLANE and a CYLINDER (never on a torus bend)
+                        if (t1 == (int)EpfcSurfaceType.EpfcSURFACE_TORUS || t2 == (int)EpfcSurfaceType.EpfcSURFACE_TORUS)
+                            continue;
+
+                        if (t1 == (int)EpfcSurfaceType.EpfcSURFACE_PLANE && t2 == (int)EpfcSurfaceType.EpfcSURFACE_CYLINDER)
                         {
                             planeSurf = s1;
-                            cylSurf = (t2 == (int)EpfcSurfaceType.EpfcSURFACE_CYLINDER) ? s2 : null;
+                            cylSurf = s2;
                         }
-                        else if (t2 == (int)EpfcSurfaceType.EpfcSURFACE_PLANE)
+                        else if (t2 == (int)EpfcSurfaceType.EpfcSURFACE_PLANE && t1 == (int)EpfcSurfaceType.EpfcSURFACE_CYLINDER)
                         {
                             planeSurf = s2;
-                            cylSurf = (t1 == (int)EpfcSurfaceType.EpfcSURFACE_CYLINDER) ? s1 : null;
+                            cylSurf = s1;
                         }
                     }
                 }
                 catch { }
 
-                // Only accept circular edges that strictly belong to a planar cut end
-                if (planeSurf != null)
+                if (planeSurf != null && cylSurf != null)
                 {
                     double cylArea = 0.0;
-                    if (cylSurf != null)
-                    {
-                        try { cylArea = cylSurf.EvalArea(); } catch { }
-                    }
+                    try { cylArea = cylSurf.EvalArea(); } catch { }
 
                     allCandidates.Add(new TerminalSide
                     {
@@ -1714,11 +1713,83 @@ namespace ConsoleApp2
             if (distinctEnds.Count <= 2)
                 return distinctEnds;
 
-            // If more than 2 candidates, pick the two furthest apart
+            // If more than 2 candidates, group by distinct cylinder axis direction and pick the outermost end on each leg
+            List<double[]> torusCenters = GetTorusCenters(itemOwner);
+            double[] refTorus = (torusCenters.Count > 0) ? torusCenters[0] : null;
+
+            List<TerminalSide> group1 = new List<TerminalSide>();
+            List<TerminalSide> group2 = new List<TerminalSide>();
+            double[] dirGroup1 = null;
+
+            for (int i = 0; i < distinctEnds.Count; i++)
+            {
+                double[] dir = GetCylinderAxisDirection(distinctEnds[i].Cylinder);
+                if (dir == null) continue;
+
+                if (dirGroup1 == null)
+                {
+                    dirGroup1 = dir;
+                    group1.Add(distinctEnds[i]);
+                }
+                else
+                {
+                    double dot = Math.Abs(dir[0] * dirGroup1[0] + dir[1] * dirGroup1[1] + dir[2] * dirGroup1[2]);
+                    if (dot > 0.90) // Same or parallel leg
+                    {
+                        group1.Add(distinctEnds[i]);
+                    }
+                    else
+                    {
+                        group2.Add(distinctEnds[i]);
+                    }
+                }
+            }
+
+            TerminalSide end1 = null;
+            TerminalSide end2 = null;
+
+            // On Leg 1: pick the outermost cut face (furthest from torus bend)
+            if (group1.Count > 0)
+            {
+                end1 = group1[0];
+                double maxD1 = (refTorus != null) ? Distance(end1.EdgeCenter, refTorus) : 0;
+                for (int i = 1; i < group1.Count; i++)
+                {
+                    double d = (refTorus != null) ? Distance(group1[i].EdgeCenter, refTorus) : 0;
+                    if (d > maxD1)
+                    {
+                        maxD1 = d;
+                        end1 = group1[i];
+                    }
+                }
+            }
+
+            // On Leg 2: pick the outermost cut face (furthest from torus bend)
+            if (group2.Count > 0)
+            {
+                end2 = group2[0];
+                double maxD2 = (refTorus != null) ? Distance(end2.EdgeCenter, refTorus) : 0;
+                for (int i = 1; i < group2.Count; i++)
+                {
+                    double d = (refTorus != null) ? Distance(group2[i].EdgeCenter, refTorus) : 0;
+                    if (d > maxD2)
+                    {
+                        maxD2 = d;
+                        end2 = group2[i];
+                    }
+                }
+            }
+
+            List<TerminalSide> result = new List<TerminalSide>();
+            if (end1 != null) result.Add(end1);
+            if (end2 != null) result.Add(end2);
+
+            if (result.Count == 2) return result;
+
+            // Fallback: pick the two furthest apart
+            double largestDistance = -1.0;
             TerminalSide bestSide1 = null;
             TerminalSide bestSide2 = null;
-            double largestDistance = -1.0;
-
             for (int i = 0; i < distinctEnds.Count; i++)
             {
                 for (int j = i + 1; j < distinctEnds.Count; j++)
@@ -1732,8 +1803,7 @@ namespace ConsoleApp2
                     }
                 }
             }
-
-            List<TerminalSide> result = new List<TerminalSide>();
+            result.Clear();
             if (bestSide1 != null) result.Add(bestSide1);
             if (bestSide2 != null) result.Add(bestSide2);
             return result;
