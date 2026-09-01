@@ -491,7 +491,7 @@ namespace ConsoleApp2
             CollectPipeItems(featureOwner.ListItems(EpfcModelItemType.EpfcITEM_COORD_SYS), "Coord System", existingItems);
             CollectPipeItems(featureOwner.ListItems(EpfcModelItemType.EpfcITEM_AXIS), "Axis", existingItems);
             CollectPipeItems(featureOwner.ListItems(EpfcModelItemType.EpfcITEM_POINT), "Point", existingItems);
-            CollectPipeItems(featureOwner.ListItems(EpfcModelItemType.EpfcITEM_FEATURE), "Feature", existingItems);
+           // CollectPipeItems(featureOwner.ListItems(EpfcModelItemType.EpfcITEM_FEATURE), "Feature", existingItems);
 
             if (existingItems.Count == 0)
             {
