@@ -91,8 +91,6 @@ namespace Tubes_Automations
                     List<AssemblyComponentInfo> allComponents = new List<AssemblyComponentInfo>();
                     HashSet<string> visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                     CollectAllComponents((IpfcAssembly)model, (IpfcAssembly)model, new List<int>(), allComponents, visited);
-
-
                     AssemblyComponentInfo bestPipeComp = null;
                     for (int i = 0; i < allComponents.Count; i++)
                     {
@@ -102,7 +100,6 @@ namespace Tubes_Automations
                         string name = "";
                         try { name = comp.InstanceName ?? ""; } catch { }
 
-                        // Compare based on Description of the part (fallback to InstanceName if Description is empty)
                         if (IsIgnoredFitting(desc) || (string.IsNullOrWhiteSpace(desc) && IsIgnoredFitting(name)))
                             continue;
 
@@ -126,8 +123,6 @@ namespace Tubes_Automations
                             string desc = GetModelDescription(comp);
                             string name = "";
                             try { name = comp.InstanceName ?? ""; } catch { }
-
-                            // Compare based on Description of the part (fallback to InstanceName if Description is empty)
                             if (IsIgnoredFitting(desc) || (string.IsNullOrWhiteSpace(desc) && IsIgnoredFitting(name)))
                                 continue;
 
