@@ -52,13 +52,13 @@ namespace Tubes_Automations
                 Connect();
                 if (Session == null)
                 {
-                    MessageBox.Show("Could not connect to an active Creo session.","Connection Error",MessageBoxButtons.OK,MessageBoxIcon.Error);
+                    MessageBox.Show("Could not connect to an active Creo session.", "Connection Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
                     return;
                 }
                 IpfcModel model = Session.CurrentModel;
                 if (model == null)
                 {
-                    MessageBox.Show("No active model found in Creo. Please open a model first.","No Model", MessageBoxButtons.OK,MessageBoxIcon.Warning);
+                    MessageBox.Show("No active model found in Creo. Please open a model first.", "No Model", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                     return;
                 }
                 if (!InitializeWorkingModel(model))
@@ -69,7 +69,7 @@ namespace Tubes_Automations
             }
             catch (Exception ex)
             {
-                MessageBox.Show( $"Error occurred: {ex.Message}", "Automation Error",MessageBoxButtons.OK,MessageBoxIcon.Error);
+                MessageBox.Show($"Error occurred: {ex.Message}", "Automation Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
         private static bool InitializeWorkingModel(IpfcModel model)
@@ -143,7 +143,7 @@ namespace Tubes_Automations
                         PipeComponentPath = null;
                         return true;
                     }
-                    MessageBox.Show("No bent pipe found in the active assembly hierarchy.","No Pipe Found",MessageBoxButtons.OK,MessageBoxIcon.Warning);
+                    MessageBox.Show("No bent pipe found in the active assembly hierarchy.", "No Pipe Found", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                     return false;
                 }
                 else
@@ -218,9 +218,7 @@ namespace Tubes_Automations
                                 IpfcParameter p = allParams[i];
                                 string pName = "";
                                 try { pName = ((IpfcModelItem)p).GetName(); } catch { }
-                                if (string.Equals(pName, "DESCRIPTION", StringComparison.OrdinalIgnoreCase) ||
-                                    string.Equals(pName, "DESC", StringComparison.OrdinalIgnoreCase) ||
-                                    string.Equals(pName, "PART_DESCRIPTION", StringComparison.OrdinalIgnoreCase))
+                                if (string.Equals(pName, "DESCRIPTION", StringComparison.OrdinalIgnoreCase))
                                 {
                                     IpfcParamValue val = p.GetScaledValue();
                                     if (val != null && !string.IsNullOrWhiteSpace(val.StringValue))
@@ -1444,7 +1442,7 @@ namespace Tubes_Automations
 
                 TerminalSide shorterSide = is0Shorter ? terminalSides[0] : terminalSides[1];
                 TerminalSide longerSide = is0Shorter ? terminalSides[1] : terminalSides[0];
-                DialogResult startChoice = MessageBox.Show("Where do you want to create the START POINT?\n\n" +"• Click [Yes] to create START POINT on the SMALLEST tube .\n" +"• Click [No] to create START POINT on the LONGEST tube .", "Start Point Selection",MessageBoxButtons.YesNo,MessageBoxIcon.Question);
+                DialogResult startChoice = MessageBox.Show("Where do you want to create the START POINT?\n\n" + "• Click [Yes] to create START POINT on the SMALLEST tube .\n" + "• Click [No] to create START POINT on the LONGEST tube .", "Start Point Selection", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
                 TerminalSide startingSide = (startChoice == DialogResult.Yes) ? shorterSide : longerSide;
                 TerminalSide endingSide = (startChoice == DialogResult.Yes) ? longerSide : shorterSide;
                 IpfcModelItem startPoint = CreateDatumPointAtEdgeCenter(featureOwner, startingSide.Edge, "PIPE_START_POINT", PipeComponentPath, out IpfcFeature featStart);
